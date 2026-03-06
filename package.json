@@ -8,7 +8,8 @@
     "dev": "vite",
     "build": "vue-tsc && vite build",
     "preview": "vite preview",
-    "server": "node server/index.cjs",
+    "server": "nodemon --watch server server/index.cjs",
+    "server:prod": "node server/index.cjs",
     "start": "concurrently \"npm run server\" \"npm run dev\""
   },
   "keywords": [],
@@ -17,15 +18,20 @@
   "dependencies": {
     "@vitejs/plugin-vue": "^6.0.3",
     "axios": "^1.13.2",
+    "better-sqlite3": "^12.6.2",
+    "cheerio": "^1.2.0",
     "cors": "^2.8.5",
+    "echarts": "^6.0.0",
     "express": "^5.2.1",
     "node-cron": "^4.2.1",
     "puppeteer": "^24.34.0",
     "puppeteer-extra": "^3.3.6",
     "puppeteer-extra-plugin-stealth": "^2.11.2",
+    "socks-proxy-agent": "^8.0.5",
     "typescript": "^5.9.3",
     "vite": "^7.3.0",
     "vue": "^3.5.26",
+    "vue-echarts": "^8.0.1",
     "vue-tsc": "^3.2.1"
   },
   "devDependencies": {
@@ -33,6 +39,7 @@
     "@types/express": "^5.0.6",
     "@types/node": "^25.0.3",
     "@types/node-cron": "^3.0.11",
-    "concurrently": "^9.2.1"
+    "concurrently": "^9.2.1",
+    "nodemon": "^3.1.14"
   }
 }

@@ -7,3 +7,4 @@ server/ssl/
 server/cookies.json
 exports/
 tasks/
+server/data/
