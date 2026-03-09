@@ -99,6 +99,17 @@ class DFCrawler extends BaseCrawler {
   }
 
   async crawl(filters = {}, callbacks = {}) {
+    // 确保页面已初始化（如果 initialize 时失败，这里重试一次）
+    if (!this._ready) {
+      try {
+        await browserPool.getPage('diamondsfactory.com', TARGET_URL)
+        this._ready = true
+        console.log('[DF] Page initialized before crawl')
+      } catch (e) {
+        console.error('[DF] Failed to initialize page before crawl:', e.message)
+      }
+    }
+
     const { onProgress, onResult } = callbacks
     const stoneCertPairs = filters.stoneCertPairs || [{ stoneType: 'LAB', certificate: 'IGI' }]
     const shapes = filters.shapes || SHAPES_LIST
@@ -230,7 +241,7 @@ class DFCrawler extends BaseCrawler {
     params.append('product_videos_json', '')
 
     try {
-      const page = await browserPool.getPage('diamondsfactory.com', TARGET_URL)
+      const page = await browserPool.getPage('diamondsfactory.com')
       const result = await page.evaluate(async (fetchUrl, fetchBody) => {
         try {
           const res = await fetch(fetchUrl, {
@@ -255,10 +266,16 @@ class DFCrawler extends BaseCrawler {
         }
       }, API_URL, params.toString())
 
-      if (result.error) return null
+      if (result.error) {
+        console.log(`[DF] API error for ${shape}/${carat}: ${result.error}`)
+        return null
+      }
 
       const price = (typeof result.data?.spf === 'number') ? result.data.spf : null
-      if (price === null) return null
+      if (price === null) {
+        console.log(`[DF] No price for ${shape}/${carat}: spf=${result.data?.spf} type=${typeof result.data?.spf}`)
+        return null
+      }
 
       // DF 的 shape code 映射到标准 shape name
       const shapeNameMap = { RND: 'Round', PRN: 'Princess', EMR: 'Emerald', MQS: 'Marquise', OVL: 'Oval', RAD: 'Radiant', PER: 'Pear', HRT: 'Heart', CUS: 'Cushion', ASC: 'Asscher' }
