@@ -1,29 +1,35 @@
 /**
- * Brilliant Earth 爬虫 (Beta)
- * 最强反爬：需要 Puppeteer stealth + SPA 无限滚动
+ * Brilliant Earth 爬虫
+ * REST API（GET 请求，query string 参数，返回 JSON）
+ * 需要 Puppeteer（Cloudflare 保护）
+ * 支持天然钻和培育钻
  */
 const BaseCrawler = require('./BaseCrawler.cjs')
 const browserPool = require('../browserPool.cjs')
 const { normalizeDiamond } = require('../normalizer.cjs')
 
-const SHAPE_URLS = {
-  'ROUND': 'https://www.brilliantearth.com/lab-diamonds-search/?shapes=Round',
-  'PRINCESS': 'https://www.brilliantearth.com/lab-diamonds-search/?shapes=Princess',
-  'EMERALD': 'https://www.brilliantearth.com/lab-diamonds-search/?shapes=Emerald',
-  'MARQUISE': 'https://www.brilliantearth.com/lab-diamonds-search/?shapes=Marquise',
-  'OVAL': 'https://www.brilliantearth.com/lab-diamonds-search/?shapes=Oval',
-  'RADIANT': 'https://www.brilliantearth.com/lab-diamonds-search/?shapes=Radiant',
-  'PEAR': 'https://www.brilliantearth.com/lab-diamonds-search/?shapes=Pear',
-  'HEART': 'https://www.brilliantearth.com/lab-diamonds-search/?shapes=Heart',
-  'CUSHION': 'https://www.brilliantearth.com/lab-diamonds-search/?shapes=Cushion',
-  'ASSCHER': 'https://www.brilliantearth.com/lab-diamonds-search/?shapes=Asscher'
+const API_PATH = '/api/v1/plp/products/'
+
+// 形状名称（直接传字符串）
+const SHAPE_NAMES = {
+  'ROUND': 'Round', 'OVAL': 'Oval', 'EMERALD': 'Emerald', 'CUSHION': 'Cushion',
+  'ELONGATED_CUSHION': 'Elongated Cushion', 'PEAR': 'Pear', 'RADIANT': 'Radiant',
+  'PRINCESS': 'Princess', 'MARQUISE': 'Marquise', 'ASSCHER': 'Asscher', 'HEART': 'Heart'
 }
 
-const NATURAL_URLS = {
-  'ROUND': 'https://www.brilliantearth.com/loose-diamonds/search/?shapes=Round',
-  'OVAL': 'https://www.brilliantearth.com/loose-diamonds/search/?shapes=Oval'
-  // 其他形状类似
+// Cut 值（直接传字符串）
+const CUT_VALUES = {
+  'SUPER_IDEAL': 'Super Ideal', 'IDEAL': 'Ideal', 'VERY_GOOD': 'Very Good',
+  'GOOD': 'Good', 'FAIR': 'Fair'
 }
+
+// stoneType -> product_class
+const PRODUCT_CLASS = {
+  'LAB': 'Lab Created Colorless Diamonds',
+  'NATURAL': 'Loose Diamonds'
+}
+
+const PAGE_SIZE = 50
 
 class BECrawler extends BaseCrawler {
   constructor() {
@@ -34,15 +40,14 @@ class BECrawler extends BaseCrawler {
     return {
       supportsLabGrown: true,
       supportsNatural: true,
-      shapes: ['ROUND', 'PRINCESS', 'EMERALD', 'MARQUISE', 'OVAL', 'RADIANT', 'PEAR', 'HEART', 'CUSHION', 'ASSCHER'],
-      caratRange: { min: 0.2, max: 9.0 },
-      clarities: ['FL', 'IF', 'VVS1', 'VVS2', 'VS1', 'VS2', 'SI1', 'SI2', 'I1'],
-      colors: ['D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L'],
-      cutGrades: ['EXCELLENT', 'VERY_GOOD', 'GOOD'],
-      certificates: ['GIA', 'IGI', 'HRD', 'GCAL'],
+      shapes: Object.keys(SHAPE_NAMES),
+      caratRange: { min: 0.25, max: 10.0 },
+      clarities: ['FL', 'IF', 'VVS1', 'VVS2', 'VS1', 'VS2', 'SI1', 'SI2'],
+      colors: ['D', 'E', 'F', 'G', 'H', 'I', 'J', 'K'],
+      cutGrades: Object.keys(CUT_VALUES),
+      certificates: ['GIA', 'IGI'],
       requiresPuppeteer: true,
-      crawlType: 'inventory',
-      beta: true // 标记为 beta
+      crawlType: 'inventory'
     }
   }
 
@@ -50,8 +55,9 @@ class BECrawler extends BaseCrawler {
     try {
       await browserPool.getPage('brilliantearth.com', 'https://www.brilliantearth.com/')
       this._ready = true
+      console.log('[BE] Initialized with Puppeteer')
     } catch (error) {
-      console.error('[BE] Failed to initialize (anti-bot protection):', error.message)
+      console.error('[BE] Failed to initialize:', error.message)
       this._ready = false
     }
   }
@@ -59,124 +65,175 @@ class BECrawler extends BaseCrawler {
   async crawl(filters = {}, callbacks = {}) {
     const { onProgress, onResult } = callbacks
     const stoneCertPairs = filters.stoneCertPairs || [{ stoneType: 'LAB', certificate: 'IGI' }]
-    const shapes = filters.shapes || ['ROUND']
+    const shapes = filters.shapes || Object.keys(SHAPE_NAMES)
     const colorClarityPairs = filters.colorClarityPairs || [{ clarity: 'VVS1', color: 'E' }, { clarity: 'VS1', color: 'G' }]
+    const cutGrades = filters.cutGrades || ['SUPER_IDEAL']
+    const caratRange = filters.caratRange || { min: 0.25, max: 10.0 }
     const results = []
 
+    // 构建任务列表：stoneType × shape × colorClarityPair × cutGrade
+    const tasks = []
     for (const { stoneType } of stoneCertPairs) {
-      const urlMap = stoneType === 'LAB' ? SHAPE_URLS : NATURAL_URLS
-
-      for (let i = 0; i < shapes.length; i++) {
-        const shape = shapes[i]
-        const url = urlMap[shape]
-        if (!url) continue
-
-        try {
-          const page = await browserPool.getPage('brilliantearth.com')
-
-          console.log(`[BE] Navigating to ${url}`)
-          await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 })
-          await this.sleep(5000) // 等待 SPA 加载
-
-          // 尝试滚动加载更多数据
-          let previousCount = 0
-          let scrollAttempts = 0
-          const maxScrollAttempts = 10
-
-          while (scrollAttempts < maxScrollAttempts) {
-            // 提取当前可见的钻石数据
-            const diamonds = await page.evaluate(() => {
-              const items = []
-              // BE 使用表格或卡片展示钻石
-              const rows = document.querySelectorAll('tr[data-diamond-id], .diamond-row, .diamond-card, [data-testid*="diamond"]')
-
-              for (const row of rows) {
-                const cells = row.querySelectorAll('td')
-                if (cells.length >= 5) {
-                  const priceText = row.querySelector('.price, [data-price]')?.textContent || ''
-                  items.push({
-                    shape: cells[0]?.textContent?.trim(),
-                    carat: parseFloat(cells[1]?.textContent) || 0,
-                    cut: cells[2]?.textContent?.trim(),
-                    color: cells[3]?.textContent?.trim(),
-                    clarity: cells[4]?.textContent?.trim(),
-                    price: parseFloat(priceText.replace(/[^0-9.]/g, '')) || 0,
-                    sourceId: row.getAttribute('data-diamond-id') || ''
-                  })
-                }
-              }
-              return items
-            })
-
-            if (diamonds.length === previousCount) break
-            previousCount = diamonds.length
-
-            // 滚动到底部
-            await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight))
-            await this.sleep(3000)
-            scrollAttempts++
+      const productClass = PRODUCT_CLASS[stoneType]
+      if (!productClass) continue
+      for (const shape of shapes) {
+        for (const pair of colorClarityPairs) {
+          for (const cutGrade of cutGrades) {
+            const cutValue = CUT_VALUES[cutGrade]
+            if (!cutValue) continue
+            tasks.push({ stoneType, productClass, shape, color: pair.color, clarity: pair.clarity, cutGrade, cutValue })
           }
+        }
+      }
+    }
 
-          // 最终提取
-          const diamonds = await page.evaluate(() => {
-            const items = []
-            const rows = document.querySelectorAll('tr[data-diamond-id], .diamond-row, .diamond-card, [data-testid*="diamond"]')
-            for (const row of rows) {
-              const cells = row.querySelectorAll('td')
-              if (cells.length >= 5) {
-                const priceText = row.querySelector('.price, [data-price]')?.textContent || ''
-                items.push({
-                  shape: cells[0]?.textContent?.trim(),
-                  carat: parseFloat(cells[1]?.textContent) || 0,
-                  cut: cells[2]?.textContent?.trim(),
-                  color: cells[3]?.textContent?.trim(),
-                  clarity: cells[4]?.textContent?.trim(),
-                  price: parseFloat(priceText.replace(/[^0-9.]/g, '')) || 0,
-                  sourceId: row.getAttribute('data-diamond-id') || ''
-                })
-              }
-            }
-            return items
+    let tasksDone = 0
+    const totalTasks = tasks.length
+
+    for (const task of tasks) {
+      const shapeName = SHAPE_NAMES[task.shape]
+      if (!shapeName) { tasksDone++; continue }
+
+      let page = 1 // 1-based
+      let hasMore = true
+      let taskFetched = 0
+      let totalHits = 0
+      const taskLabel = `${task.stoneType} ${task.shape} ${task.color}+${task.clarity} ${task.cutGrade}`
+
+      while (hasMore) {
+        try {
+          const queryString = this._buildQueryParams({
+            shapeName, color: task.color, clarity: task.clarity,
+            cutValue: task.cutValue, productClass: task.productClass,
+            caratRange, page
           })
 
-          for (const d of diamonds) {
-            if (!d.price || d.price <= 0) continue
+          const data = await this._fetchPage(queryString)
+          if (!data || !data.products) {
+            hasMore = false
+            break
+          }
 
-            // Filter by fixed clarity+color pairs
-            const matchesPair = colorClarityPairs.some(p => p.color === d.color && p.clarity === d.clarity)
-            if (!matchesPair) continue
+          const products = data.products
+          if (products.length === 0) {
+            hasMore = false
+            break
+          }
 
+          // BE API 没有返回 totalCount，用第一页判断是否有下一页
+          // 如果返回的数量 < PAGE_SIZE，说明是最后一页
+          for (const d of products) {
             const normalized = normalizeDiamond({
-              stoneType: stoneType === 'LAB' ? 'lab' : 'natural',
-              shape: d.shape || shape.toLowerCase(),
+              stoneType: task.stoneType === 'LAB' ? 'lab' : 'natural',
+              shape: d.shape || shapeName,
               carat: d.carat,
               color: d.color,
               clarity: d.clarity,
               cut: d.cut,
-              certificate: null,
+              certificate: d.report,
               priceUSD: d.price,
               priceCurrency: 'USD',
-              sourceId: d.sourceId
+              sourceId: d.upc || d.id
             }, 'BE')
 
             results.push(normalized)
             if (onResult) onResult(normalized)
           }
 
+          taskFetched += products.length
+
           if (onProgress) {
-            onProgress(i + 1, shapes.length, results.length)
+            const detail = `${taskLabel} - page ${page} (${taskFetched} fetched)`
+            onProgress(tasksDone, totalTasks, results.length, detail)
           }
 
-          await this.sleep(3000)
+          hasMore = products.length >= PAGE_SIZE
+          page++
+          await this.sleep(600)
         } catch (error) {
-          console.error(`[BE] Error crawling ${shape}:`, error.message)
+          console.error(`[BE] Error ${taskLabel} page ${page}:`, error.message)
+          hasMore = false
         }
       }
+
+      tasksDone++
+      if (onProgress) {
+        onProgress(tasksDone, totalTasks, results.length, `${taskLabel} - done`)
+      }
+      console.log(`[BE] Task ${tasksDone}/${totalTasks} done: ${taskLabel} (${results.length} diamonds)`)
+      await this.sleep(300)
     }
 
     const deduplicated = this.deduplicateByLowestPrice(results)
     console.log(`[BE] Done: ${results.length} raw → ${deduplicated.length} after dedup`)
     return deduplicated
+  }
+
+  _buildQueryParams({ shapeName, color, clarity, cutValue, productClass, caratRange, page }) {
+    const params = new URLSearchParams()
+    params.set('display', String(PAGE_SIZE))
+    params.set('page', String(page))
+    params.set('currency', 'USD')
+    params.set('product_class', productClass)
+    params.set('shapes', shapeName)
+    params.set('cuts', cutValue)
+    params.set('colors', color)
+    params.set('clarities', clarity)
+    params.set('polishes', 'Good,Very Good,Excellent')
+    params.set('symmetries', 'Good,Very Good,Excellent')
+    params.set('fluorescences', 'Very Strong,Strong,Medium,Faint,None')
+    params.set('min_price', '170')
+    params.set('max_price', '500000')
+    params.set('MIN_PRICE', '170')
+    params.set('MAX_PRICE', '500000')
+    params.set('min_table', '45')
+    params.set('max_table', '97')
+    params.set('MIN_TABLE', '45')
+    params.set('MAX_TABLE', '97')
+    params.set('min_depth', '3.6')
+    params.set('max_depth', '97.4')
+    params.set('MIN_DEPTH', '3.6')
+    params.set('MAX_DEPTH', '97.4')
+    params.set('min_carat', String(caratRange.min))
+    params.set('max_carat', String(caratRange.max))
+    params.set('MIN_CARAT', String(caratRange.min))
+    params.set('MAX_CARAT', String(caratRange.max))
+    params.set('min_ratio', '1')
+    params.set('max_ratio', '2.75')
+    params.set('MIN_RATIO', '1')
+    params.set('MAX_RATIO', '2.75')
+    params.set('order_by', 'price')
+    params.set('order_method', 'asc')
+
+    return params.toString()
+  }
+
+  async _fetchPage(queryString) {
+    const url = `${API_PATH}?${queryString}`
+
+    return this.fetchWithRetry(async () => {
+      const page = await browserPool.getPage('brilliantearth.com', 'https://www.brilliantearth.com/')
+      const result = await page.evaluate(async (fetchUrl) => {
+        try {
+          const res = await fetch(fetchUrl, {
+            headers: {
+              'Accept': 'application/json',
+              'X-Requested-With': 'XMLHttpRequest'
+            }
+          })
+          if (res.status !== 200) return { error: `HTTP ${res.status}` }
+          const json = await res.json()
+          return { data: json }
+        } catch (e) {
+          return { error: e.message }
+        }
+      }, url)
+
+      if (result.error) {
+        throw new Error(result.error)
+      }
+      return result.data
+    })
   }
 }
 

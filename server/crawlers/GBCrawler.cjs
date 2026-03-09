@@ -240,7 +240,7 @@ class GBCrawler extends BaseCrawler {
     const url = `${API_PATH}?${queryString}`
 
     return this.fetchWithRetry(async () => {
-      const page = await browserPool.getPage('grownbrilliance.com')
+      const page = await browserPool.getPage('grownbrilliance.com', 'https://www.grownbrilliance.com/')
       const result = await page.evaluate(async (fetchUrl) => {
         try {
           const res = await fetch(fetchUrl, {

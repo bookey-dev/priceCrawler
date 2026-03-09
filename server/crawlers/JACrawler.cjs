@@ -203,7 +203,7 @@ class JACrawler extends BaseCrawler {
     const body = JSON.stringify({ query: GRAPHQL_QUERY, variables })
 
     return this.fetchWithRetry(async () => {
-      const page = await browserPool.getPage('jamesallen.com')
+      const page = await browserPool.getPage('jamesallen.com', SITE_URL)
       const result = await page.evaluate(async (fetchUrl, fetchBody) => {
         try {
           const res = await fetch(fetchUrl, {
