@@ -30,7 +30,7 @@ class SevenSevenDCrawler extends BaseCrawler {
       supportsLabGrown: true,
       supportsNatural: true,
       shapes: Object.keys(SHAPE_IDS),
-      caratRange: { min: 0.3, max: 9.0 },
+      caratRange: { min: 0.2, max: 10.0 },
       clarities: Object.keys(CLARITY_IDS),
       colors: Object.keys(COLOR_IDS),
       cutGrades: Object.keys(CUT_IDS),
@@ -71,109 +71,139 @@ class SevenSevenDCrawler extends BaseCrawler {
     const stoneCertPairs = filters.stoneCertPairs || [{ stoneType: 'LAB', certificate: 'IGI' }]
     const shapes = filters.shapes || Object.keys(SHAPE_IDS)
     const colorClarityPairs = filters.colorClarityPairs || [{ clarity: 'VVS1', color: 'E' }, { clarity: 'VS1', color: 'G' }]
+    const cutGrades = filters.cutGrades || ['EXCELLENT']
+    const caratRange = filters.caratRange || { min: 0.2, max: 10.0 }
     const results = []
-    let totalFetched = 0
+    const PAGE_SIZE = 50
 
+    // 构建任务列表：stoneType × shape × colorClarityPair × cutGrade
+    const tasks = []
     for (const { stoneType } of stoneCertPairs) {
-      const stoneTypeId = stoneType === 'LAB' ? 3 : 1
-
       for (const shape of shapes) {
-        const shapeId = SHAPE_IDS[shape]
-        if (!shapeId) continue
-
-        // Crawl each clarity+color pair separately
         for (const pair of colorClarityPairs) {
-          const colorId = COLOR_IDS[pair.color]
-          const clarityId = CLARITY_IDS[pair.clarity]
-          if (!colorId || !clarityId) continue
-
-        let page = 1
-        let hasMore = true
-
-        while (hasMore) {
-          try {
-            const body = {
-              categoryId: 7,
-              itemId: -1,
-              stoneType: stoneTypeId,
-              diamondType: -1,
-              metalId: null,
-              shapes: [shapeId],
-              isGroupedShapes: false,
-              CurrentPageNumber: page,
-              ResultsPerPage: 50,
-              colors: [colorId],
-              clarities: [clarityId],
-              cuts: filters.cutIds || null,
-              Certificates: filters.certIds || null,
-              Polishes: null,
-              Symmetries: null,
-              Fluorescences: null,
-              Intensities: null,
-              minCarat: filters.caratRange?.min || 0.3,
-              maxCarat: filters.caratRange?.max || 30,
-              minPrice: filters.priceRange?.min || 100,
-              maxPrice: filters.priceRange?.max || 5000000,
-              minRatio: 1,
-              maxRatio: 5,
-              minDepth: 0, maxDepth: 0,
-              minTable: 0, maxTable: 0,
-              WithMedia: false,
-              QuickShipping: false,
-              CountryId: 840,
-              CurrencyId: 3, // USD
-              LanguageId: 1,
-              UserPreference: { CountryId: 840, CurrencyId: 3, LanguageId: 1, DiscountCode: null },
-              Url: SITE_URL
-            }
-
-            const data = await this._fetchPage(body)
-            if (!data || !data.Diamonds || data.Diamonds.length === 0) {
-              hasMore = false
-              break
-            }
-
-            for (const d of data.Diamonds) {
-              const normalized = normalizeDiamond({
-                stoneType: stoneTypeId === 3 ? 'lab' : 'natural',
-                shape: d.ShapeName || shape,
-                carat: d.CaratWeight || d.Carat,
-                color: d.Color,
-                clarity: d.Clarity,
-                cut: d.Cut,
-                certificate: d.Cert,
-                priceUSD: d.FinalSalePriceUSD || d.FinalSalePriceGBP,
-                priceOriginal: d.FinalSalePriceGBP,
-                priceCurrency: 'GBP',
-                sourceId: d.Code || d.StockNumber
-              }, '77D')
-
-              results.push(normalized)
-              if (onResult) onResult(normalized)
-            }
-
-            totalFetched += data.Diamonds.length
-            const totalCount = data.Total || totalFetched
-            if (onProgress) {
-              const totalPages = Math.ceil(totalCount / 50)
-              const detail = `${stoneType} ${shape} ${pair.color}+${pair.clarity} - page ${page}/${totalPages} (${totalCount} hits)`
-              onProgress(totalFetched, totalCount, results.length, detail)
-            }
-
-            hasMore = data.Diamonds.length >= 50 && totalFetched < (data.Total || Infinity)
-            page++
-            await this.sleep(800)
-          } catch (error) {
-            console.error(`[77D] Error fetching ${shape} page ${page}:`, error.message)
-            // 尝试刷新 session
-            if (error.message.includes('500') || error.message.includes('403')) {
-              await this._getSessionCookies()
-            }
-            hasMore = false
+          for (const cutGrade of cutGrades) {
+            const cutId = CUT_IDS[cutGrade]
+            if (cutId === undefined) continue
+            tasks.push({ stoneType, shape, color: pair.color, clarity: pair.clarity, cutGrade, cutId })
           }
         }
-        } // end colorClarityPairs
       }
+    }
+
+    let tasksDone = 0
+    const totalTasks = tasks.length
+
+    for (const task of tasks) {
+      const shapeId = SHAPE_IDS[task.shape]
+      if (!shapeId) { tasksDone++; continue }
+      const colorId = COLOR_IDS[task.color]
+      const clarityId = CLARITY_IDS[task.clarity]
+      if (!colorId || !clarityId) { tasksDone++; continue }
+
+      const stoneTypeId = task.stoneType === 'LAB' ? 3 : 1
+      let page = 1
+      let hasMore = true
+      let taskFetched = 0
+      const taskLabel = `${task.stoneType} ${task.shape} ${task.color}+${task.clarity} ${task.cutGrade}`
+
+      while (hasMore) {
+        try {
+          const body = {
+            categoryId: 7,
+            itemId: -1,
+            stoneType: stoneTypeId,
+            diamondType: '-1',
+            shapes: [shapeId],
+            isGroupedShapes: false,
+            currentPage: page,
+            resultsPerPage: PAGE_SIZE,
+            CurrentPageNumber: page,
+            ResultsPerPage: PAGE_SIZE,
+            colors: [colorId],
+            clarities: [clarityId],
+            cuts: [task.cutId],
+            Certificates: [],
+            Polishes: [],
+            Symmetries: [],
+            Fluorescences: [],
+            Intensities: [],
+            minCarat: String(caratRange.min),
+            maxCarat: String(caratRange.max),
+            minPrice: 0,
+            maxPrice: 0,
+            minRatio: 1,
+            maxRatio: 5,
+            minDepth: 0, maxDepth: 0,
+            minTable: 0, maxTable: 0,
+            country: 0,
+            currency: 0,
+            language: 0,
+            searchBlocked: false,
+            showPairs: false,
+            withMedia: false,
+            quickShipping: false,
+            WithMedia: false,
+            QuickShipping: false,
+            CountryId: 840,
+            CurrencyId: 3,
+            LanguageId: 1,
+            UserPreference: { CountryId: 840, CurrencyId: 3, LanguageId: 1 },
+            Url: SITE_URL
+          }
+
+          const data = await this._fetchPage(body)
+          if (!data || !data.Diamonds || data.Diamonds.length === 0) {
+            hasMore = false
+            break
+          }
+
+          const totalHits = data.Total || 0
+
+          for (const d of data.Diamonds) {
+            const normalized = normalizeDiamond({
+              stoneType: stoneTypeId === 3 ? 'lab' : 'natural',
+              shape: d.ShapeName || task.shape,
+              carat: d.CaratWeight || parseFloat(d.Carat),
+              color: d.Color,
+              clarity: d.Clarity,
+              cut: d.Cut,
+              certificate: d.Cert,
+              priceUSD: d.FinalSalePriceUSD || d.FinalSalePriceGBP,
+              priceCurrency: 'USD',
+              sourceId: d.Code || d.StockNumber
+            }, '77D')
+
+            results.push(normalized)
+            if (onResult) onResult(normalized)
+          }
+
+          taskFetched += data.Diamonds.length
+          const totalPages = Math.ceil(totalHits / PAGE_SIZE) || 1
+
+          // 分页进度
+          if (onProgress) {
+            const detail = `${taskLabel} - page ${page}/${totalPages} (${totalHits} hits, ${taskFetched} fetched)`
+            onProgress(tasksDone, totalTasks, results.length, detail)
+          }
+
+          hasMore = taskFetched < totalHits && data.Diamonds.length >= PAGE_SIZE
+          page++
+          await this.sleep(800)
+        } catch (error) {
+          console.error(`[77D] Error ${taskLabel} page ${page}:`, error.message)
+          if (error.message.includes('500') || error.message.includes('403')) {
+            await this._getSessionCookies()
+          }
+          hasMore = false
+        }
+      }
+
+      tasksDone++
+      if (onProgress) {
+        onProgress(tasksDone, totalTasks, results.length, `${taskLabel} - done`)
+      }
+      console.log(`[77D] Task ${tasksDone}/${totalTasks} done: ${taskLabel} (${results.length} diamonds)`)
+      await this.sleep(300)
     }
 
     const deduplicated = this.deduplicateByLowestPrice(results)
