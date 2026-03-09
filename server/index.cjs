@@ -173,17 +173,36 @@ async function startServer() {
       console.log(`Access your server at: https://192.168.1.58:${PORT}`)
     })
 
-    await Promise.all(brands.map(async (brand) => {
+    // 非 Puppeteer 爬虫并行初始化
+    const nonPuppeteer = brands.filter(b => {
+      const c = registry.getCrawler(b.id)
+      return c && !c.getCapabilities().requiresPuppeteer
+    })
+    const puppeteerBrands = brands.filter(b => {
+      const c = registry.getCrawler(b.id)
+      return c && c.getCapabilities().requiresPuppeteer
+    })
+
+    await Promise.all(nonPuppeteer.map(async (brand) => {
       const crawler = registry.getCrawler(brand.id)
-      if (crawler) {
-        try {
-          await crawler.initialize()
-          console.log(`  ✓ ${crawler.brandName} ready`)
-        } catch (e) {
-          console.log(`  ✗ ${crawler.brandName}: ${e.message}`)
-        }
+      try {
+        await crawler.initialize()
+        console.log(`  ✓ ${crawler.brandName} ready`)
+      } catch (e) {
+        console.log(`  ✗ ${crawler.brandName}: ${e.message}`)
       }
     }))
+
+    // Puppeteer 爬虫串行初始化（共享浏览器，避免并发连接问题）
+    for (const brand of puppeteerBrands) {
+      const crawler = registry.getCrawler(brand.id)
+      try {
+        await crawler.initialize()
+        console.log(`  ✓ ${crawler.brandName} ready`)
+      } catch (e) {
+        console.log(`  ✗ ${crawler.brandName}: ${e.message}`)
+      }
+    }
     console.log(`Crawlers initialized (${brands.length} brands registered)`)
   } catch (error) {
     console.error('Failed to start server:', error.message)

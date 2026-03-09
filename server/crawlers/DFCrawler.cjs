@@ -93,6 +93,7 @@ class DFCrawler extends BaseCrawler {
     const poolStatus = browserPool.getStatus()
     return {
       ready: this._ready && poolStatus.ready,
+      hasInstance: poolStatus.hasInstance,
       proxyUrl: poolStatus.proxyUrl
     }
   }
@@ -229,7 +230,7 @@ class DFCrawler extends BaseCrawler {
     params.append('product_videos_json', '')
 
     try {
-      const page = await browserPool.getPage('diamondsfactory.com')
+      const page = await browserPool.getPage('diamondsfactory.com', TARGET_URL)
       const result = await page.evaluate(async (fetchUrl, fetchBody) => {
         try {
           const res = await fetch(fetchUrl, {

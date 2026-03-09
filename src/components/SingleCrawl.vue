@@ -426,6 +426,10 @@ async function fetchBrowserStatus() {
   try {
     const response = await axios.get('/api/browser/status', { params: { brand: props.brand.id } })
     browserStatus.value = response.data
+    // 同步更新导航栏状态指示器
+    if (response.data.ready !== undefined) {
+      props.brand.status.ready = response.data.ready
+    }
   } catch (error) {
     // ignore
   }

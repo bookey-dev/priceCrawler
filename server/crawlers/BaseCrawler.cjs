@@ -56,7 +56,16 @@ class BaseCrawler {
    * 获取爬虫状态
    */
   getStatus() {
-    return { ready: this._ready }
+    const status = { ready: this._ready }
+    if (this.getCapabilities().requiresPuppeteer) {
+      try {
+        const browserPool = require('../browserPool.cjs')
+        const poolStatus = browserPool.getStatus()
+        status.hasInstance = poolStatus.hasInstance
+        status.proxyUrl = poolStatus.proxyUrl
+      } catch (e) {}
+    }
+    return status
   }
 
   /**
