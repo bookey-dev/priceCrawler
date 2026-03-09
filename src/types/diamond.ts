@@ -7,6 +7,8 @@ export interface BrandCapabilities {
   clarities: string[]
   colors: string[]
   cutGrades: string[]
+  shapeLabels?: Record<string, string>
+  cutGradeLabels?: Record<string, string>
   certificates: string[]
   requiresPuppeteer: boolean
   crawlType: 'inventory' | 'configurator'

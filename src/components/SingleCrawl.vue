@@ -63,7 +63,7 @@
               :class="{ selected: selectedShapes.includes(shape) }"
               @click="toggleSelection(selectedShapes, shape)"
             >
-              {{ shape }}
+              {{ shapeLabel(shape) }}
             </div>
           </div>
           <div class="select-actions">
@@ -127,7 +127,7 @@
               :class="{ selected: selectedCutGrades.includes(cut) }"
               @click="toggleSelection(selectedCutGrades, cut)"
             >
-              {{ cut }}
+              {{ cutGradeLabel(cut) }}
             </div>
           </div>
           <div class="select-actions">
@@ -231,6 +231,9 @@ const availableShapes = computed(() => caps.value.shapes || [])
 const availableCaratValues = computed(() => caps.value.caratValues || [])
 const availableCutGrades = computed(() => caps.value.cutGrades || [])
 
+const shapeLabel = (key: string) => caps.value.shapeLabels?.[key] || key
+const cutGradeLabel = (key: string) => caps.value.cutGradeLabels?.[key] || key
+
 // ========== 选中状态 ==========
 const selectedShapes = ref<string[]>([])
 const selectedCarats = ref<string[]>([])
@@ -281,7 +284,7 @@ function resetSelections() {
 
   selectedShapes.value = [...c.shapes]
   selectedCarats.value = c.caratValues ? [...c.caratValues] : []
-  selectedCutGrades.value = ['EX', 'EXCELLENT'].filter(v => c.cutGrades.includes(v))
+  selectedCutGrades.value = ['EX', 'EXCELLENT', 'SUPER_IDEAL'].filter(v => c.cutGrades.includes(v))
   if (selectedCutGrades.value.length === 0) selectedCutGrades.value = [...c.cutGrades]
 
   caratMin.value = c.caratRange.min

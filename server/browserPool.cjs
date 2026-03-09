@@ -10,35 +10,45 @@ const PROXY_URL = 'socks5://127.0.0.1:7897'
 
 let browserInstance = null
 let browserReady = false
+let browserLaunching = null // 防止并发 launch
 const pages = new Map() // domain -> page
 
 async function getBrowser() {
   if (browserInstance) {
     try {
-      // 检查浏览器是否还活着
       await browserInstance.version()
       return browserInstance
     } catch (e) {
       console.log('[BrowserPool] Browser lost, relaunching...')
       browserInstance = null
       browserReady = false
+      browserLaunching = null
       pages.clear()
     }
   }
 
-  console.log('[BrowserPool] Launching Puppeteer with proxy...')
-  browserInstance = await puppeteer.launch({
-    headless: 'new',
-    args: [
-      `--proxy-server=${PROXY_URL}`,
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-blink-features=AutomationControlled'
-    ]
-  })
+  // 防止并发 launch：如果已经在 launching，等待同一个 promise
+  if (browserLaunching) {
+    return browserLaunching
+  }
 
-  browserReady = true
-  return browserInstance
+  browserLaunching = (async () => {
+    console.log('[BrowserPool] Launching Puppeteer with proxy...')
+    browserInstance = await puppeteer.launch({
+      headless: 'new',
+      args: [
+        `--proxy-server=${PROXY_URL}`,
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-blink-features=AutomationControlled'
+      ]
+    })
+    browserReady = true
+    browserLaunching = null
+    return browserInstance
+  })()
+
+  return browserLaunching
 }
 
 /**
@@ -62,14 +72,13 @@ async function getPage(domain, targetUrl) {
 
   if (targetUrl) {
     console.log(`[BrowserPool] Navigating to ${domain}...`)
-    await page.goto(targetUrl, { waitUntil: 'networkidle2', timeout: 60000 })
+    await page.goto(targetUrl, { waitUntil: 'networkidle2', timeout: 90000 })
 
     // 等待 Cloudflare challenge 完成
     let attempts = 0
     while (attempts < 30) {
       const title = await page.title()
       if (!title.includes('Just a moment') && !title.includes('Attention Required')) {
-        // 检查是否被 Access denied 拦截
         if (title.includes('Access denied')) {
           console.error(`[BrowserPool] ${domain} blocked by Cloudflare: "${title}"`)
           throw new Error(`Cloudflare Access denied for ${domain}`)
@@ -105,6 +114,7 @@ async function shutdown() {
     try { await browserInstance.close() } catch (e) {}
     browserInstance = null
     browserReady = false
+    browserLaunching = null
   }
   console.log('[BrowserPool] Shutdown complete')
 }

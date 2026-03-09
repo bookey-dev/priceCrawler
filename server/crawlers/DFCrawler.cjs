@@ -66,11 +66,13 @@ class DFCrawler extends BaseCrawler {
       supportsLabGrown: true,
       supportsNatural: true,
       shapes: SHAPES_LIST,
+      shapeLabels: { RND: 'Round', PRN: 'Princess', EMR: 'Emerald', MQS: 'Marquise', OVL: 'Oval', RAD: 'Radiant', PER: 'Pear', HRT: 'Heart', CUS: 'Cushion', ASC: 'Asscher' },
       caratRange: { min: 0.2, max: 10.0 },
       caratValues: CARATS_LIST,
       clarities: CLARITIES_LIST,
       colors: COLORS_LIST,
       cutGrades: CUT_GRADES_LIST,
+      cutGradeLabels: { EX: 'Excellent', VG: 'Very Good', GD: 'Good', FR: 'Fair' },
       certificates: CERTIFICATES_LIST,
       requiresPuppeteer: true,
       crawlType: 'configurator'
