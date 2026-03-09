@@ -1,128 +1,197 @@
 /**
  * James Allen 爬虫
- * SSR 页面，从嵌入的 appData.ssrPageData 中提取数据
+ * GraphQL API（和 BN 同属 Signet Jewelers，API 结构几乎一样）
+ * JA 有 PerimeterX bot 检测，需要通过 Puppeteer 浏览器上下文发请求
  */
 const BaseCrawler = require('./BaseCrawler.cjs')
+const browserPool = require('../browserPool.cjs')
 const { normalizeDiamond } = require('../normalizer.cjs')
 
-const BASE_URL = 'https://www.jamesallen.com/loose-diamonds/all-diamonds/'
-const LAB_URL = 'https://www.jamesallen.com/loose-diamonds/all-diamonds/' // JA uses same URL with isLabDiamond param
+const API_URL = 'https://www.jamesallen.com/service-api/ja-product-api/diamond/v/2/'
+const SITE_URL = 'https://www.jamesallen.com/loose-diamonds/round-cut/'
 
-const SHAPE_SLUGS = {
-  'ROUND': 'round-cut', 'PRINCESS': 'princess-cut', 'EMERALD': 'emerald-cut',
-  'MARQUISE': 'marquise-cut', 'OVAL': 'oval-cut', 'RADIANT': 'radiant-cut',
-  'PEAR': 'pear-cut', 'HEART': 'heart-cut', 'CUSHION': 'cushion-cut',
-  'ASSCHER': 'asscher-cut'
+const SHAPE_IDS = {
+  'ROUND': [1], 'PRINCESS': [2], 'RADIANT': [3], 'EMERALD': [4],
+  'MARQUISE': [5], 'OVAL': [6], 'PEAR': [7], 'HEART': [8],
+  'ASSCHER': [9], 'CUSHION': [10]
 }
+
+const COLOR_IDS = { 'D': 1, 'E': 2, 'F': 3, 'G': 4, 'H': 5, 'I': 6, 'J': 7, 'K': 8 }
+const CLARITY_IDS = { 'FL': 1, 'IF': 2, 'VVS1': 3, 'VVS2': 4, 'VS1': 5, 'VS2': 6, 'SI1': 7, 'SI2': 8, 'I1': 9 }
+const CUT_IDS = { 'TRUE_HEARTS': 0, 'EXCELLENT': 1, 'VERY_GOOD': 3, 'GOOD': 4 }
+
+const GRAPHQL_QUERY = `query ($currency: currencies, $sort: sortBy, $price: intRange, $page: pager,
+  $depth: floatRange, $ratio: floatRange, $carat: floatRange, $tableSize: floatRange,
+  $color: intRange, $cut: intRange, $shapeID: [Int], $clarity: intRange,
+  $shippingDays: Int, $isLabDiamond: Boolean, $isOnSale: Boolean) {
+  searchByIDs(currency: $currency, sort: $sort, price: $price, page: $page,
+    depth: $depth, ratio: $ratio, carat: $carat, tableSize: $tableSize,
+    color: $color, cut: $cut, shapeID: $shapeID, clarity: $clarity,
+    shippingDays: $shippingDays, isLabDiamond: $isLabDiamond, isOnSale: $isOnSale) {
+    hits pageNumber numberOfPages total
+    items {
+      productID sku price usdPrice title url
+      stone {
+        carat shape { id name } color { id name } clarity { id name }
+        cut { id name } lab { id name } depth tableSize measurements
+      }
+    }
+  }
+}`
 
 class JACrawler extends BaseCrawler {
   constructor() {
     super('JA', 'James Allen')
-    this._ready = true
+    this._ready = false
   }
 
   getCapabilities() {
     return {
       supportsLabGrown: true,
       supportsNatural: true,
-      shapes: Object.keys(SHAPE_SLUGS),
-      caratRange: { min: 0.2, max: 9.0 },
-      clarities: ['FL', 'IF', 'VVS1', 'VVS2', 'VS1', 'VS2', 'SI1', 'SI2'],
-      colors: ['D', 'E', 'F', 'G', 'H', 'I', 'J', 'K'],
-      cutGrades: ['EXCELLENT', 'VERY_GOOD', 'GOOD'],
+      shapes: Object.keys(SHAPE_IDS),
+      caratRange: { min: 0.2, max: 10.0 },
+      clarities: Object.keys(CLARITY_IDS),
+      colors: Object.keys(COLOR_IDS),
+      cutGrades: Object.keys(CUT_IDS),
       certificates: ['GIA', 'IGI'],
-      requiresPuppeteer: false,
+      requiresPuppeteer: true,
       crawlType: 'inventory'
     }
   }
 
   async initialize() {
-    this._ready = true
+    try {
+      await browserPool.getPage('jamesallen.com', SITE_URL)
+      this._ready = true
+      console.log('[JA] Initialized with Puppeteer')
+    } catch (e) {
+      console.error('[JA] Failed to initialize:', e.message)
+      this._ready = false
+    }
   }
 
   async crawl(filters = {}, callbacks = {}) {
     const { onProgress, onResult } = callbacks
     const stoneCertPairs = filters.stoneCertPairs || [{ stoneType: 'LAB', certificate: 'IGI' }]
-    const shapes = filters.shapes || Object.keys(SHAPE_SLUGS)
+    const shapes = filters.shapes || Object.keys(SHAPE_IDS)
     const colorClarityPairs = filters.colorClarityPairs || [{ clarity: 'VVS1', color: 'E' }, { clarity: 'VS1', color: 'G' }]
+    const cutGrades = filters.cutGrades || ['EXCELLENT']
+    const caratRange = filters.caratRange || { min: 0.2, max: 10.0 }
     const results = []
-    let totalFetched = 0
 
+    // 构建任务列表：stoneType × shape × colorClarityPair × cutGrade
+    const tasks = []
     for (const { stoneType } of stoneCertPairs) {
-      // JA 培育钻和天然钻使用不同的 URL 路径
-      const baseUrl = stoneType === 'LAB'
-        ? 'https://www.jamesallen.com/loose-diamonds/lab-created-diamonds/'
-        : BASE_URL
-
       for (const shape of shapes) {
-        const shapeSlug = SHAPE_SLUGS[shape]
-        if (!shapeSlug) continue
-
-        let page = 1
-        let hasMore = true
-
-        while (hasMore) {
-          try {
-            const params = new URLSearchParams()
-            params.set('Shape', shapeSlug)
-            if (filters.caratRange) {
-              params.set('MinCarat', filters.caratRange.min.toString())
-              params.set('MaxCarat', filters.caratRange.max.toString())
-            }
-            params.set('Sort', 'price-asc')
-            params.set('page', page.toString())
-
-            const url = `${baseUrl}?${params.toString()}`
-            const data = await this._fetchPage(url)
-
-            if (!data || !data.items || data.items.length === 0) {
-              hasMore = false
-              break
-            }
-
-            for (const item of data.items) {
-              const diamond = Array.isArray(item) ? item[0] : item
-              if (!diamond || !diamond.stone) continue
-
-              // Filter by fixed clarity+color pairs
-              const dColor = diamond.stone.color?.name
-              const dClarity = diamond.stone.clarity?.name
-              const matchesPair = colorClarityPairs.some(p => p.color === dColor && p.clarity === dClarity)
-              if (!matchesPair) continue
-
-              const normalized = normalizeDiamond({
-                stoneType: stoneType === 'LAB' ? 'lab' : 'natural',
-                shape: diamond.stone.shape?.name || shape,
-                carat: diamond.stone.carat,
-                color: dColor,
-                clarity: dClarity,
-                cut: diamond.stone.cut?.name,
-                certificate: diamond.stone.lab?.name,
-                priceUSD: diamond.usdPrice || diamond.price,
-                priceCurrency: 'USD',
-                sourceId: diamond.sku
-              }, 'JA')
-
-              results.push(normalized)
-              if (onResult) onResult(normalized)
-            }
-
-            totalFetched += data.items.length
-            if (onProgress) {
-              const totalHits = data.hits || totalFetched
-              const detail = `${stoneType} ${shape} - page ${page}/${data.numberOfPages || '?'} (${totalHits} hits)`
-              onProgress(totalFetched, totalHits, results.length, detail)
-            }
-
-            hasMore = page < (data.numberOfPages || 1)
-            page++
-            await this.sleep(800)
-          } catch (error) {
-            console.error(`[JA] Error fetching ${shape} page ${page}:`, error.message)
-            hasMore = false
+        for (const pair of colorClarityPairs) {
+          for (const cutGrade of cutGrades) {
+            const cutId = CUT_IDS[cutGrade]
+            if (cutId === undefined) continue
+            tasks.push({ stoneType, shape, color: pair.color, clarity: pair.clarity, cutGrade, cutId })
           }
         }
       }
+    }
+
+    let tasksDone = 0
+    const totalTasks = tasks.length
+
+    for (const task of tasks) {
+      const shapeId = SHAPE_IDS[task.shape]
+      if (!shapeId) { tasksDone++; continue }
+      const colorId = COLOR_IDS[task.color]
+      const clarityId = CLARITY_IDS[task.clarity]
+      if (colorId === undefined || clarityId === undefined) { tasksDone++; continue }
+
+      const isLab = task.stoneType === 'LAB'
+      let page = 1
+      let hasMore = true
+      let taskFetched = 0
+      const taskLabel = `${task.stoneType} ${task.shape} ${task.color}+${task.clarity} ${task.cutGrade}`
+
+      while (hasMore) {
+        try {
+          const variables = {
+            currency: 'USD',
+            sort: 'PriceAsc',
+            page: { count: 4, size: 8, number: page },
+            shapeID: shapeId,
+            isLabDiamond: isLab,
+            isOnSale: false,
+            carat: { from: caratRange.min, to: caratRange.max },
+            color: { from: colorId, to: colorId },
+            clarity: { from: clarityId, to: clarityId },
+            cut: { from: task.cutId, to: task.cutId },
+            price: { from: 200, to: 5000000 },
+            depth: { from: 46, to: 78 },
+            tableSize: { from: 50, to: 80 },
+            ratio: { from: 0.9, to: 2.75 },
+            shippingDays: 999
+          }
+
+          const data = await this._fetchPage(variables)
+          if (!data || !data.searchByIDs || !data.searchByIDs.items) {
+            hasMore = false
+            break
+          }
+
+          const { items, numberOfPages, hits: totalHits } = data.searchByIDs
+          // items 是嵌套分组数组（count 组 × size 条），展开
+          const allItems = items.flat()
+          if (allItems.length === 0) {
+            hasMore = false
+            break
+          }
+
+          // 截断：只取到 hits 数量为止
+          const remaining = (totalHits || Infinity) - taskFetched
+          const itemsToProcess = remaining < allItems.length ? allItems.slice(0, remaining) : allItems
+
+          for (const diamond of itemsToProcess) {
+            if (!diamond || !diamond.stone) continue
+
+            const normalized = normalizeDiamond({
+              stoneType: isLab ? 'lab' : 'natural',
+              shape: diamond.stone.shape?.name || task.shape,
+              carat: diamond.stone.carat,
+              color: diamond.stone.color?.name,
+              clarity: diamond.stone.clarity?.name,
+              cut: diamond.stone.cut?.name,
+              certificate: diamond.stone.lab?.name,
+              priceUSD: diamond.usdPrice || diamond.price,
+              priceCurrency: 'USD',
+              sourceId: diamond.sku
+            }, 'JA')
+
+            results.push(normalized)
+            if (onResult) onResult(normalized)
+          }
+
+          taskFetched += itemsToProcess.length
+          const realPages = Math.ceil((totalHits || 0) / allItems.length) || numberOfPages || 1
+
+          // 分页进度
+          if (onProgress) {
+            const detail = `${taskLabel} - page ${page}/${realPages} (${totalHits || '?'} hits, ${taskFetched} fetched)`
+            onProgress(tasksDone, totalTasks, results.length, detail)
+          }
+
+          hasMore = taskFetched < (totalHits || 0) && page < (numberOfPages || 1)
+          page++
+          await this.sleep(300)
+        } catch (error) {
+          console.error(`[JA] Error ${taskLabel} page ${page}:`, error.message)
+          hasMore = false
+        }
+      }
+
+      tasksDone++
+      if (onProgress) {
+        onProgress(tasksDone, totalTasks, results.length, `${taskLabel} - done`)
+      }
+      console.log(`[JA] Task ${tasksDone}/${totalTasks} done: ${taskLabel} (${results.length} diamonds)`)
+      await this.sleep(300)
     }
 
     const deduplicated = this.deduplicateByLowestPrice(results)
@@ -130,44 +199,31 @@ class JACrawler extends BaseCrawler {
     return deduplicated
   }
 
-  async _fetchPage(url) {
+  async _fetchPage(variables) {
+    const body = JSON.stringify({ query: GRAPHQL_QUERY, variables })
+
     return this.fetchWithRetry(async () => {
-      const response = await fetch(url, {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+      const page = await browserPool.getPage('jamesallen.com')
+      const result = await page.evaluate(async (fetchUrl, fetchBody) => {
+        try {
+          const res = await fetch(fetchUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: fetchBody
+          })
+          if (res.status !== 200) return { error: `HTTP ${res.status}` }
+          const json = await res.json()
+          return { data: json.data }
+        } catch (e) {
+          return { error: e.message }
         }
-      })
+      }, API_URL, body)
 
-      if (!response.ok) throw new Error(`HTTP ${response.status}`)
-      const html = await response.text()
-
-      // 从 HTML 中提取嵌入的 appData JSON
-      const appDataMatch = html.match(/appData\s*=\s*(\{[\s\S]*?\});\s*(?:<\/script>|window\.)/)
-      if (!appDataMatch) {
-        // 尝试另一种格式
-        const ssrMatch = html.match(/"ssrPageData"\s*:\s*(\{[\s\S]*?\})\s*,\s*"/)
-        if (!ssrMatch) throw new Error('Could not find ssrPageData in HTML')
-        const ssrData = JSON.parse(ssrMatch[1])
-        const pageData = ssrData['0']?.searchByIDs || ssrData.searchByIDs
-        return pageData || null
+      if (result.error) {
+        throw new Error(result.error)
       }
-
-      try {
-        const appData = JSON.parse(appDataMatch[1])
-        const ssrData = appData.ssrPageData || {}
-        // ssrPageData 可能嵌套在 "0" 键下
-        const pageData = ssrData['0']?.searchByIDs || ssrData.searchByIDs
-        return pageData || null
-      } catch (parseError) {
-        // 尝试更宽松的提取
-        const searchMatch = html.match(/"searchByIDs"\s*:\s*(\{[\s\S]*?"items"\s*:\s*\[[\s\S]*?\]\s*\})/)
-        if (searchMatch) {
-          return JSON.parse(searchMatch[1])
-        }
-        throw new Error('Failed to parse appData JSON')
-      }
-    }, 2) // JA 只重试 2 次
+      return result.data
+    })
   }
 }
 
