@@ -16,7 +16,7 @@ const SHAPE_IDS = {
 
 const COLOR_RANGE = { 'D': 1, 'E': 2, 'F': 3, 'G': 4, 'H': 5, 'I': 6, 'J': 7, 'K': 8 }
 const CLARITY_RANGE = { 'FL': 1, 'IF': 2, 'VVS1': 3, 'VVS2': 4, 'VS1': 5, 'VS2': 6, 'SI1': 7, 'SI2': 8 }
-const CUT_RANGE = { 'IDEAL': 0, 'EXCELLENT': 1, 'VERY_GOOD': 2, 'GOOD': 3 }
+const CUT_RANGE = { 'ASTOR': 0, 'EXCELLENT': 1, 'VERY_GOOD': 3, 'GOOD': 4 }
 
 const GRAPHQL_QUERY = `query ($currency: currencies, $sort: sortBy, $price: intRange, $page: pager,
   $depth: floatRange, $ratio: floatRange, $carat: floatRange, $tableSize: floatRange,
@@ -51,7 +51,7 @@ class BNCrawler extends BaseCrawler {
       caratRange: { min: 0.2, max: 10.0 },
       clarities: ['FL', 'IF', 'VVS1', 'VVS2', 'VS1', 'VS2', 'SI1', 'SI2'],
       colors: ['D', 'E', 'F', 'G', 'H', 'I', 'J', 'K'],
-      cutGrades: ['IDEAL', 'EXCELLENT', 'VERY_GOOD', 'GOOD'],
+      cutGrades: ['ASTOR', 'EXCELLENT', 'VERY_GOOD', 'GOOD'],
       certificates: ['GIA', 'IGI'],
       requiresPuppeteer: false,
       crawlType: 'inventory'
