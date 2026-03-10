@@ -1,9 +1,10 @@
 /**
  * Diamonds Factory 爬虫
  * 配置器模型：POST 配置组合，返回单个价格
+ * 使用 puppeteer-real-browser 绕过 Cloudflare
  */
 const BaseCrawler = require('./BaseCrawler.cjs')
-const browserPool = require('../browserPool.cjs')
+const { connect } = require('puppeteer-real-browser')
 const { normalizeDiamond } = require('../normalizer.cjs')
 
 const TARGET_URL = 'https://www.diamondsfactory.com/design/prong-setting-solitaire-engagement-ring-clrn0709701'
@@ -59,6 +60,8 @@ const CERTIFICATES_LIST = ['DF', 'EGL', 'IGI', 'GIA']
 class DFCrawler extends BaseCrawler {
   constructor() {
     super('DF', 'Diamonds Factory')
+    this._page = null
+    this._browser = null
   }
 
   getCapabilities() {
@@ -79,9 +82,50 @@ class DFCrawler extends BaseCrawler {
     }
   }
 
+  async _getPage() {
+    // 复用已有页面
+    if (this._page) {
+      try {
+        await this._page.title()
+        return this._page
+      } catch (e) {
+        console.log('[DF] Page lost, reconnecting...')
+        this._page = null
+        this._browser = null
+      }
+    }
+
+    console.log('[DF] Launching puppeteer-real-browser...')
+    const { page, browser } = await connect({
+      headless: 'auto',
+      turnstile: true,
+      args: ['--no-sandbox', '--lang=en-US']
+    })
+    this._browser = browser
+    this._page = page
+
+    console.log('[DF] Navigating to target page...')
+    await page.goto(TARGET_URL, { waitUntil: 'domcontentloaded', timeout: 90000 }).catch(e => {
+      console.log('[DF] Navigation timeout (may still work):', e.message)
+    })
+
+    // 等待 Cloudflare 通过
+    for (let i = 0; i < 30; i++) {
+      const title = await page.title()
+      if (!title.includes('Just a moment') && !title.includes('请稍候') && !title.includes('Attention')) {
+        console.log(`[DF] Cloudflare passed! Title: "${title}"`)
+        return page
+      }
+      console.log(`[DF] Waiting for Cloudflare... (${i + 1}/30)`)
+      await this.sleep(2000)
+    }
+
+    throw new Error('Cloudflare challenge not passed after 60 seconds')
+  }
+
   async initialize() {
     try {
-      await browserPool.getPage('diamondsfactory.com', TARGET_URL)
+      await this._getPage()
       this._ready = true
     } catch (error) {
       console.error('[DF] Failed to initialize:', error.message)
@@ -89,20 +133,27 @@ class DFCrawler extends BaseCrawler {
     }
   }
 
+  async shutdown() {
+    if (this._browser) {
+      try { await this._browser.close() } catch (e) {}
+      this._browser = null
+      this._page = null
+    }
+    this._ready = false
+  }
+
   getStatus() {
-    const poolStatus = browserPool.getStatus()
     return {
-      ready: this._ready && poolStatus.ready,
-      hasInstance: poolStatus.hasInstance,
-      proxyUrl: poolStatus.proxyUrl
+      ready: this._ready,
+      hasInstance: !!this._browser
     }
   }
 
   async crawl(filters = {}, callbacks = {}) {
-    // 确保页面已初始化（如果 initialize 时失败，这里重试一次）
+    // 确保页面已初始化
     if (!this._ready) {
       try {
-        await browserPool.getPage('diamondsfactory.com', TARGET_URL)
+        await this._getPage()
         this._ready = true
         console.log('[DF] Page initialized before crawl')
       } catch (e) {
@@ -116,7 +167,7 @@ class DFCrawler extends BaseCrawler {
     const carats = filters.carats || CARATS_LIST
     const colorClarityPairs = filters.colorClarityPairs || [{ clarity: 'VVS1', color: 'E' }, { clarity: 'VS1', color: 'G' }]
     const cutGrades = filters.cutGrades || CUT_GRADES_LIST
-    const concurrency = filters.concurrency || 15
+    const concurrency = filters.concurrency || 3
 
     // 生成所有组合
     const combinations = []
@@ -241,7 +292,7 @@ class DFCrawler extends BaseCrawler {
     params.append('product_videos_json', '')
 
     try {
-      const page = await browserPool.getPage('diamondsfactory.com')
+      const page = await this._getPage()
       const result = await page.evaluate(async (fetchUrl, fetchBody) => {
         try {
           const res = await fetch(fetchUrl, {

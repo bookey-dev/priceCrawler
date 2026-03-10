@@ -27,13 +27,14 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, onUnmounted } from 'vue'
 import type { Brand } from '@/types/diamond'
 import { getBrands } from '@/api'
 import SingleCrawl from './components/SingleCrawl.vue'
 
 const brands = ref<Brand[]>([])
 const activeTab = ref('')
+let statusTimer: ReturnType<typeof setInterval> | null = null
 
 onMounted(async () => {
   try {
@@ -41,9 +42,25 @@ onMounted(async () => {
     if (brands.value.length > 0) {
       activeTab.value = brands.value[0].id
     }
+    // 定时刷新品牌状态（爬虫初始化可能晚于服务器启动）
+    statusTimer = setInterval(async () => {
+      try {
+        const updated = await getBrands()
+        for (const b of updated) {
+          const existing = brands.value.find(e => e.id === b.id)
+          if (existing) {
+            existing.status = b.status
+          }
+        }
+      } catch (e) { /* ignore */ }
+    }, 5000)
   } catch (e) {
     console.error('Failed to load brands:', e)
   }
+})
+
+onUnmounted(() => {
+  if (statusTimer) clearInterval(statusTimer)
 })
 </script>
 

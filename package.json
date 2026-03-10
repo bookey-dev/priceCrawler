@@ -27,6 +27,7 @@
     "puppeteer": "^24.34.0",
     "puppeteer-extra": "^3.3.6",
     "puppeteer-extra-plugin-stealth": "^2.11.2",
+    "puppeteer-real-browser": "^1.4.4",
     "socks-proxy-agent": "^8.0.5",
     "typescript": "^5.9.3",
     "vite": "^7.3.0",
