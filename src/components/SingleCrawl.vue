@@ -145,7 +145,7 @@
 
       <button
         class="btn btn-primary btn-large"
-        @click="handleCrawl"
+        @click="handleCrawl()"
         :disabled="loading || totalCombinations === 0"
       >
         {{ loading ? `Crawling... ${progress}` : `Start Crawl` }}
@@ -304,8 +304,25 @@ const totalCombinations = computed(() => {
 })
 
 // ========== 爬取 ==========
-async function handleCrawl() {
-  if (totalCombinations.value === 0) return
+async function handleCrawl(options: { silent?: boolean } = {}) {
+  if (loading.value) {
+    return {
+      ok: false,
+      status: 'skipped',
+      brandId: props.brand.id,
+      brandName: props.brand.name,
+      message: 'Already crawling'
+    }
+  }
+  if (totalCombinations.value === 0) {
+    return {
+      ok: false,
+      status: 'skipped',
+      brandId: props.brand.id,
+      brandName: props.brand.name,
+      message: 'No combinations selected'
+    }
+  }
 
   loading.value = true
   progress.value = 'Starting...'
@@ -334,10 +351,26 @@ async function handleCrawl() {
     }, 3000)
 
     pollSession(result.sessionId)
+    return {
+      ok: true,
+      status: 'started',
+      brandId: props.brand.id,
+      brandName: props.brand.name,
+      sessionId: result.sessionId
+    }
   } catch (error: any) {
     console.error('Crawl error:', error)
-    alert(`Failed to start crawl: ${error.message}`)
+    if (!options.silent) {
+      alert(`Failed to start crawl: ${error.message}`)
+    }
     loading.value = false
+    return {
+      ok: false,
+      status: 'failed',
+      brandId: props.brand.id,
+      brandName: props.brand.name,
+      message: error.message
+    }
   }
 }
 
@@ -467,6 +500,16 @@ onUnmounted(() => {
   if (browserStatusInterval) {
     clearInterval(browserStatusInterval)
   }
+})
+
+defineExpose({
+  startCrawl: () => handleCrawl({ silent: true }),
+  getCrawlState: () => ({
+    brandId: props.brand.id,
+    brandName: props.brand.name,
+    loading: loading.value,
+    totalCombinations: totalCombinations.value
+  })
 })
 </script>
 
