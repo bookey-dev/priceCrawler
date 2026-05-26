@@ -1,4 +1,5 @@
 const express = require('express')
+const http = require('http')
 const https = require('https')
 const cors = require('cors')
 const fs = require('fs')
@@ -149,15 +150,24 @@ app.post('/api/browser/restart', async (req, res) => {
 })
 
 const PORT = process.env.PORT || 3005
+const useHttps = process.env.HTTPS === 'true'
+const sslKeyPath = path.join(__dirname, 'ssl', 'server.key')
+const sslCertPath = path.join(__dirname, 'ssl', 'server.cert')
 
-// Load SSL certificates
-const sslOptions = {
-  key: fs.readFileSync(path.join(__dirname, 'ssl', 'server.key')),
-  cert: fs.readFileSync(path.join(__dirname, 'ssl', 'server.cert'))
+let protocol = 'http'
+let server = http.createServer(app)
+
+if (useHttps) {
+  if (fs.existsSync(sslKeyPath) && fs.existsSync(sslCertPath)) {
+    server = https.createServer({
+      key: fs.readFileSync(sslKeyPath),
+      cert: fs.readFileSync(sslCertPath)
+    }, app)
+    protocol = 'https'
+  } else {
+    console.warn('[Server] HTTPS=true but SSL files were not found; starting HTTP server instead.')
+  }
 }
-
-// Create HTTPS server
-const server = https.createServer(sslOptions, app)
 
 // 初始化所有爬虫并启动服务器
 async function startServer() {
@@ -167,8 +177,8 @@ async function startServer() {
 
     // 先启动服务器，再并行初始化爬虫（避免慢爬虫阻塞整个服务）
     server.listen(PORT, () => {
-      console.log(`HTTPS Server running on port ${PORT}`)
-      console.log(`Access your server at: https://192.168.1.58:${PORT}`)
+      console.log(`${protocol.toUpperCase()} Server running on port ${PORT}`)
+      console.log(`Access your server at: ${protocol}://localhost:${PORT}`)
     })
 
     // 非 Puppeteer 爬虫并行初始化
