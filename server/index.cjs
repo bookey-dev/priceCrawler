@@ -6,6 +6,7 @@ const fs = require('fs')
 const path = require('path')
 const cookieManager = require('./cookieManager.cjs')
 const browserPool = require('./browserPool.cjs')
+const db = require('./db.cjs')
 
 // 多品牌爬虫系统
 const registry = require('./crawlers/CrawlerRegistry.cjs')
@@ -37,6 +38,15 @@ if (!fs.existsSync(EXPORT_DIR)) {
   fs.mkdirSync(EXPORT_DIR, { recursive: true })
 }
 
+function csvCell(value) {
+  if (value === null || value === undefined) return '""'
+  return `"${String(value).replace(/"/g, '""')}"`
+}
+
+function downloadDate() {
+  return new Date().toISOString().slice(0, 10)
+}
+
 const app = express()
 app.use(cors())
 app.use(express.json())
@@ -45,6 +55,106 @@ app.use(express.json())
 app.use('/api', brandsRouter)
 app.use('/api', comparisonRouter)
 app.use('/api', trendsRouter)
+
+// 一键导出所有品牌：每个品牌取最新一条有数据的 completed session
+app.get('/api/exports/all', (req, res) => {
+  try {
+    const d = db.getDb()
+    const sessions = d.prepare(`
+      SELECT cs.*
+      FROM crawl_sessions cs
+      JOIN (
+        SELECT brand, MAX(id) AS latest_session_id
+        FROM crawl_sessions
+        WHERE status = 'completed' AND total_diamonds > 0
+        GROUP BY brand
+      ) latest ON latest.latest_session_id = cs.id
+      ORDER BY cs.brand
+    `).all()
+
+    if (sessions.length === 0) {
+      return res.status(404).json({ error: 'No completed brand sessions with data found' })
+    }
+
+    const sessionIds = sessions.map(s => s.id)
+    const placeholders = sessionIds.map(() => '?').join(',')
+    const rows = d.prepare(`
+      SELECT
+        dp.*,
+        cs.started_at AS session_started_at,
+        cs.completed_at AS session_completed_at
+      FROM diamond_prices dp
+      JOIN crawl_sessions cs ON cs.id = dp.crawl_session_id
+      WHERE dp.crawl_session_id IN (${placeholders})
+      ORDER BY dp.brand, dp.id
+    `).all(...sessionIds)
+
+    if (rows.length === 0) {
+      return res.status(404).json({ error: 'No data found for latest completed brand sessions' })
+    }
+
+    const format = req.query.format === 'json' ? 'json' : 'csv'
+    const filename = `all-brands-latest-${downloadDate()}.${format}`
+
+    if (format === 'json') {
+      res.setHeader('Content-Type', 'application/json')
+      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`)
+      res.json({
+        generatedAt: new Date().toISOString(),
+        sessions,
+        rows
+      })
+      return
+    }
+
+    const headers = [
+      'Session ID',
+      'Brand',
+      'Stone Type',
+      'Shape',
+      'Carat',
+      'Color',
+      'Clarity',
+      'Cut',
+      'Certificate',
+      'Price (USD)',
+      'Price Original',
+      'Currency',
+      'Source ID',
+      'Carat Bucket',
+      'Grade Key',
+      'Crawled At',
+      'Session Started At',
+      'Session Completed At'
+    ]
+    const csvRows = rows.map(r => [
+      r.crawl_session_id,
+      r.brand,
+      r.stone_type,
+      r.shape,
+      r.carat,
+      r.color,
+      r.clarity,
+      r.cut,
+      r.certificate,
+      r.price_usd,
+      r.price_original,
+      r.price_currency,
+      r.source_id,
+      r.carat_bucket,
+      r.grade_key,
+      r.crawled_at,
+      r.session_started_at,
+      r.session_completed_at
+    ].map(csvCell).join(','))
+
+    res.setHeader('Content-Type', 'text/csv')
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`)
+    res.send([headers.join(','), ...csvRows].join('\n'))
+  } catch (error) {
+    res.status(500).json({ error: error.message })
+  }
+})
 
 // 下载导出文件
 app.get('/api/exports/:filename', (req, res) => {
@@ -223,13 +333,13 @@ process.on('SIGINT', async () => {
   console.log('\nShutting down...')
   await registry.shutdownAll()
   await browserPool.shutdown()
-  require('./db.cjs').closeDb()
+  db.closeDb()
   process.exit(0)
 })
 process.on('SIGTERM', async () => {
   await registry.shutdownAll()
   await browserPool.shutdown()
-  require('./db.cjs').closeDb()
+  db.closeDb()
   process.exit(0)
 })
 
