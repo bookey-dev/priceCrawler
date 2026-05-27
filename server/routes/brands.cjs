@@ -54,12 +54,13 @@ router.post('/brands/:brandId/crawl', async (req, res) => {
   // 异步执行爬取
   ;(async () => {
     try {
-      const results = await crawler.crawl(filters, {
+      const crawlResult = await crawler.crawl(filters, {
         onProgress: (completed, total, successCount, detail) => {
           db.updateSessionProgress(sessionId, completed, total, successCount, detail)
           console.log(`[${brandId}] Progress: ${completed}/${total} (success: ${successCount})${detail ? ' | ' + detail : ''}`)
         }
       })
+      const results = Array.isArray(crawlResult) ? crawlResult : (crawlResult?.rows || [])
 
       // 写入数据库
       if (results.length > 0) {

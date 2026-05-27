@@ -4,6 +4,7 @@ const https = require('https')
 const cors = require('cors')
 const fs = require('fs')
 const path = require('path')
+const zlib = require('zlib')
 const cookieManager = require('./cookieManager.cjs')
 const browserPool = require('./browserPool.cjs')
 const db = require('./db.cjs')
@@ -14,7 +15,6 @@ const DFCrawler = require('./crawlers/DFCrawler.cjs')
 const BNCrawler = require('./crawlers/BNCrawler.cjs')
 const SevenSevenDCrawler = require('./crawlers/77DCrawler.cjs')
 const WCCrawler = require('./crawlers/WCCrawler.cjs')
-const JACrawler = require('./crawlers/JACrawler.cjs')
 const GBCrawler = require('./crawlers/GBCrawler.cjs')
 const BECrawler = require('./crawlers/BECrawler.cjs')
 
@@ -28,7 +28,6 @@ registry.register(new DFCrawler())
 registry.register(new BNCrawler())
 registry.register(new SevenSevenDCrawler())
 registry.register(new WCCrawler())
-registry.register(new JACrawler())
 registry.register(new GBCrawler())
 registry.register(new BECrawler())
 
@@ -47,6 +46,109 @@ function downloadDate() {
   return new Date().toISOString().slice(0, 10)
 }
 
+function sanitizeFilenamePart(value) {
+  return String(value || 'brand')
+    .replace(/[<>:"/\\|?*\x00-\x1F]/g, '-')
+    .replace(/\s+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '') || 'brand'
+}
+
+const CRC32_TABLE = (() => {
+  const table = new Uint32Array(256)
+  for (let i = 0; i < 256; i++) {
+    let c = i
+    for (let j = 0; j < 8; j++) {
+      c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1
+    }
+    table[i] = c >>> 0
+  }
+  return table
+})()
+
+function crc32(buffer) {
+  let crc = 0xffffffff
+  for (const byte of buffer) {
+    crc = CRC32_TABLE[(crc ^ byte) & 0xff] ^ (crc >>> 8)
+  }
+  return (crc ^ 0xffffffff) >>> 0
+}
+
+function dosDateTime(date = new Date()) {
+  const year = Math.max(date.getFullYear(), 1980)
+  const dosTime = (date.getHours() << 11) | (date.getMinutes() << 5) | Math.floor(date.getSeconds() / 2)
+  const dosDate = ((year - 1980) << 9) | ((date.getMonth() + 1) << 5) | date.getDate()
+  return { dosTime, dosDate }
+}
+
+function createZip(files) {
+  const chunks = []
+  const centralDirectory = []
+  let offset = 0
+  const { dosTime, dosDate } = dosDateTime()
+
+  for (const file of files) {
+    const name = Buffer.from(file.name, 'utf8')
+    const data = Buffer.isBuffer(file.data) ? file.data : Buffer.from(String(file.data))
+    const compressed = zlib.deflateRawSync(data)
+    const checksum = crc32(data)
+
+    const localHeader = Buffer.alloc(30)
+    localHeader.writeUInt32LE(0x04034b50, 0)
+    localHeader.writeUInt16LE(20, 4)
+    localHeader.writeUInt16LE(0x0800, 6)
+    localHeader.writeUInt16LE(8, 8)
+    localHeader.writeUInt16LE(dosTime, 10)
+    localHeader.writeUInt16LE(dosDate, 12)
+    localHeader.writeUInt32LE(checksum, 14)
+    localHeader.writeUInt32LE(compressed.length, 18)
+    localHeader.writeUInt32LE(data.length, 22)
+    localHeader.writeUInt16LE(name.length, 26)
+    localHeader.writeUInt16LE(0, 28)
+
+    chunks.push(localHeader, name, compressed)
+
+    const centralHeader = Buffer.alloc(46)
+    centralHeader.writeUInt32LE(0x02014b50, 0)
+    centralHeader.writeUInt16LE(20, 4)
+    centralHeader.writeUInt16LE(20, 6)
+    centralHeader.writeUInt16LE(0x0800, 8)
+    centralHeader.writeUInt16LE(8, 10)
+    centralHeader.writeUInt16LE(dosTime, 12)
+    centralHeader.writeUInt16LE(dosDate, 14)
+    centralHeader.writeUInt32LE(checksum, 16)
+    centralHeader.writeUInt32LE(compressed.length, 20)
+    centralHeader.writeUInt32LE(data.length, 24)
+    centralHeader.writeUInt16LE(name.length, 28)
+    centralHeader.writeUInt16LE(0, 30)
+    centralHeader.writeUInt16LE(0, 32)
+    centralHeader.writeUInt16LE(0, 34)
+    centralHeader.writeUInt16LE(0, 36)
+    centralHeader.writeUInt32LE(0, 38)
+    centralHeader.writeUInt32LE(offset, 42)
+    centralDirectory.push(centralHeader, name)
+
+    offset += localHeader.length + name.length + compressed.length
+  }
+
+  const centralDirectoryOffset = offset
+  const centralDirectorySize = centralDirectory.reduce((sum, chunk) => sum + chunk.length, 0)
+  chunks.push(...centralDirectory)
+
+  const end = Buffer.alloc(22)
+  end.writeUInt32LE(0x06054b50, 0)
+  end.writeUInt16LE(0, 4)
+  end.writeUInt16LE(0, 6)
+  end.writeUInt16LE(files.length, 8)
+  end.writeUInt16LE(files.length, 10)
+  end.writeUInt32LE(centralDirectorySize, 12)
+  end.writeUInt32LE(centralDirectoryOffset, 16)
+  end.writeUInt16LE(0, 20)
+  chunks.push(end)
+
+  return Buffer.concat(chunks)
+}
+
 const app = express()
 app.use(cors())
 app.use(express.json())
@@ -55,6 +157,18 @@ app.use(express.json())
 app.use('/api', brandsRouter)
 app.use('/api', comparisonRouter)
 app.use('/api', trendsRouter)
+
+app.post('/api/admin/reset-database', (req, res) => {
+  try {
+    const deleted = db.resetDatabaseToInitialState()
+    res.json({
+      message: 'Database reset to initial state',
+      deleted
+    })
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ error: error.message })
+  }
+})
 
 // 一键导出所有品牌：每个品牌取最新一条有数据的 completed session
 app.get('/api/exports/all', (req, res) => {
@@ -94,16 +208,35 @@ app.get('/api/exports/all', (req, res) => {
     }
 
     const format = req.query.format === 'json' ? 'json' : 'csv'
-    const filename = `all-brands-latest-${downloadDate()}.${format}`
+    const filename = `all-brands-latest-${downloadDate()}.${format === 'json' ? 'zip' : format}`
 
     if (format === 'json') {
-      res.setHeader('Content-Type', 'application/json')
-      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`)
-      res.json({
-        generatedAt: new Date().toISOString(),
-        sessions,
-        rows
+      const generatedAt = new Date().toISOString()
+      const rowsBySession = new Map()
+      for (const row of rows) {
+        if (!rowsBySession.has(row.crawl_session_id)) rowsBySession.set(row.crawl_session_id, [])
+        rowsBySession.get(row.crawl_session_id).push(row)
+      }
+
+      const files = sessions.map(session => {
+        const brandRows = rowsBySession.get(session.id) || []
+        const datePart = session.started_at.split(/[T ]/)[0]
+        const safeBrand = sanitizeFilenamePart(session.brand)
+        return {
+          name: `${safeBrand}-session${session.id}-${datePart}.json`,
+          data: JSON.stringify({
+            generatedAt,
+            session,
+            rows: brandRows
+          }, null, 2)
+        }
       })
+
+      const zip = createZip(files)
+      res.setHeader('Content-Type', 'application/zip')
+      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`)
+      res.setHeader('Content-Length', zip.length)
+      res.send(zip)
       return
     }
 
@@ -237,12 +370,39 @@ app.get('/api/browser/status', (req, res) => {
   }
 })
 
-// 重新初始化浏览器（使用 browserPool）
+// 重新初始化浏览器（可按品牌重启）
 app.post('/api/browser/restart', async (req, res) => {
   try {
-    await browserPool.shutdown()
+    const brandId = req.query.brand || req.body?.brand
+
+    if (brandId) {
+      const crawler = registry.getCrawler(brandId)
+      if (!crawler || !crawler.getCapabilities().requiresPuppeteer) {
+        return res.status(404).json({ error: 'Puppeteer brand not found' })
+      }
+
+      await crawler.shutdown()
+      await crawler.initialize()
+      const status = crawler.getStatus()
+      return res.json({ message: `Browser restarted for ${brandId}`, status })
+    }
+
     // 重新初始化需要浏览器的爬虫
     const puppeteerBrands = registry.getBrandList().filter(b => b.capabilities.requiresPuppeteer)
+    for (const brand of puppeteerBrands) {
+      const crawler = registry.getCrawler(brand.id)
+      if (crawler) {
+        try {
+          await crawler.shutdown()
+        } catch (e) {
+          console.log(`  [${brand.id}] shutdown failed: ${e.message}`)
+        }
+      }
+    }
+
+    await browserPool.shutdown()
+
+    const statuses = {}
     for (const brand of puppeteerBrands) {
       const crawler = registry.getCrawler(brand.id)
       if (crawler) {
@@ -251,9 +411,10 @@ app.post('/api/browser/restart', async (req, res) => {
         } catch (e) {
           console.log(`  [${brand.id}] reinit failed: ${e.message}`)
         }
+        statuses[brand.id] = crawler.getStatus()
       }
     }
-    res.json({ message: 'Browser restarted', status: browserPool.getStatus() })
+    res.json({ message: 'Browser restarted', status: browserPool.getStatus(), brands: statuses })
   } catch (error) {
     res.status(500).json({ error: error.message })
   }
@@ -316,7 +477,8 @@ async function startServer() {
       const crawler = registry.getCrawler(brand.id)
       try {
         await crawler.initialize()
-        console.log(`  ✓ ${crawler.brandName} ready`)
+        const status = crawler.getStatus()
+        console.log(status.ready ? `  ✓ ${crawler.brandName} ready` : `  ✗ ${crawler.brandName}: ${status.lastError || 'not ready'}`)
       } catch (e) {
         console.log(`  ✗ ${crawler.brandName}: ${e.message}`)
       }

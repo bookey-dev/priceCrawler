@@ -1,5 +1,6 @@
 const puppeteer = require('puppeteer-extra')
 const StealthPlugin = require('puppeteer-extra-plugin-stealth')
+const fs = require('fs')
 puppeteer.use(StealthPlugin())
 
 // Puppeteer 浏览器实例（全局共享，通过 Chromium 真实 TLS 指纹绕过 Cloudflare）
@@ -9,6 +10,28 @@ let browserReady = false
 
 const PROXY_URL = 'socks5://127.0.0.1:7897'
 const TARGET_URL = 'https://www.diamondsfactory.com/design/prong-setting-solitaire-engagement-ring-clrn0709701'
+const DEFAULT_CHROME_PATHS = [
+  process.env.CHROME_EXECUTABLE_PATH,
+  process.env.PUPPETEER_EXECUTABLE_PATH,
+  process.env.PROGRAMFILES ? `${process.env.PROGRAMFILES}\\Google\\Chrome\\Application\\chrome.exe` : null,
+  process.env['PROGRAMFILES(X86)'] ? `${process.env['PROGRAMFILES(X86)']}\\Google\\Chrome\\Application\\chrome.exe` : null,
+  process.env.LOCALAPPDATA ? `${process.env.LOCALAPPDATA}\\Google\\Chrome\\Application\\chrome.exe` : null
+].filter(Boolean)
+
+function resolveChromeExecutablePath() {
+  const configuredPath = process.env.CHROME_EXECUTABLE_PATH || process.env.PUPPETEER_EXECUTABLE_PATH
+  if (configuredPath) {
+    if (!fs.existsSync(configuredPath)) {
+      throw new Error(`Chrome executable not found at ${configuredPath}. Set CHROME_EXECUTABLE_PATH to a valid chrome.exe path.`)
+    }
+    return configuredPath
+  }
+
+  const defaultPath = DEFAULT_CHROME_PATHS.find(p => fs.existsSync(p))
+  if (defaultPath) return defaultPath
+
+  throw new Error('Chrome executable not found. Set CHROME_EXECUTABLE_PATH, for example: $env:CHROME_EXECUTABLE_PATH="C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"')
+}
 
 /**
  * 初始化 Puppeteer 浏览器，导航到目标网站通过 Cloudflare challenge
@@ -25,13 +48,15 @@ async function initBrowser() {
     }
   }
 
-  console.log('[Browser] Launching Puppeteer with proxy...')
+  const executablePath = resolveChromeExecutablePath()
+  console.log(`[Browser] Launching Puppeteer with Chrome: ${executablePath}`)
 
   if (browserInstance) {
     try { await browserInstance.close() } catch (e) {}
   }
 
   browserInstance = await puppeteer.launch({
+    executablePath,
     headless: 'new',
     args: [
       `--proxy-server=${PROXY_URL}`,

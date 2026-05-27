@@ -289,6 +289,26 @@ function getTrendData(filters = {}) {
   `).all(...params)
 }
 
+function resetDatabaseToInitialState() {
+  const d = getDb()
+  const reset = d.transaction(() => {
+    const deleted = {
+      diamondPrices: d.prepare('DELETE FROM diamond_prices').run().changes,
+      crawlSessions: d.prepare('DELETE FROM crawl_sessions').run().changes,
+      priceSnapshots: d.prepare('DELETE FROM price_snapshots').run().changes
+    }
+
+    d.prepare(`
+      DELETE FROM sqlite_sequence
+      WHERE name IN ('diamond_prices', 'crawl_sessions', 'price_snapshots')
+    `).run()
+
+    return deleted
+  })
+
+  return reset()
+}
+
 function closeDb() {
   if (db) {
     db.close()
@@ -308,5 +328,6 @@ module.exports = {
   computeAndSaveSnapshots,
   getComparisonData,
   getTrendData,
+  resetDatabaseToInitialState,
   closeDb
 }

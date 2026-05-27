@@ -20,6 +20,7 @@
         </span>
         <span class="browser-status-text">
           <template v-if="browserRestarting">正在重启...</template>
+          <template v-else-if="browserStatus.initializing">浏览器启动中...</template>
           <template v-else-if="browserStatus.ready">就绪 (Cloudflare 已通过)</template>
           <template v-else-if="browserStatus.hasInstance">浏览器已启动，等待 Cloudflare 验证...</template>
           <template v-else>未启动</template>
@@ -31,6 +32,8 @@
       <div class="browser-info">
         <span class="browser-detail">代理: {{ browserStatus.proxyUrl || '未配置' }}</span>
         <span class="browser-detail">自动管理 Cookie，无需手动设置</span>
+        <span v-if="browserStatus.lastTitle && !browserStatus.ready" class="browser-detail">页面: {{ browserStatus.lastTitle }}</span>
+        <span v-if="browserStatus.lastError" class="browser-detail browser-error">错误: {{ browserStatus.lastError }}</span>
       </div>
     </div>
 
@@ -105,7 +108,7 @@
           <label>Clarity + Color</label>
           <div class="multi-select">
             <div
-              v-for="pair in FIXED_CLARITY_COLOR_PAIRS"
+              v-for="pair in availableClarityColorPairs"
               :key="pair.clarity + pair.color"
               class="chip selected"
               style="cursor: default;"
@@ -230,6 +233,15 @@ const availableStoneCertPairs = computed(() => {
 const availableShapes = computed(() => caps.value.shapes || [])
 const availableCaratValues = computed(() => caps.value.caratValues || [])
 const availableCutGrades = computed(() => caps.value.cutGrades || [])
+const availableClarityColorPairs = computed(() => {
+  const clarities = caps.value.clarities || []
+  const colors = caps.value.colors || []
+  return FIXED_CLARITY_COLOR_PAIRS.filter(pair => {
+    const supportsClarity = clarities.length === 0 || clarities.includes(pair.clarity)
+    const supportsColor = colors.length === 0 || colors.includes(pair.color)
+    return supportsClarity && supportsColor
+  })
+})
 
 const shapeLabel = (key: string) => caps.value.shapeLabels?.[key] || key
 const cutGradeLabel = (key: string) => caps.value.cutGradeLabels?.[key] || key
@@ -244,6 +256,11 @@ const caratMax = ref(10.0)
 // ========== 爬取状态 ==========
 const loading = ref(false)
 const progress = ref('')
+const currentSessionId = ref<number | null>(null)
+const crawlStatus = ref<'idle' | 'running' | 'completed' | 'failed'>('idle')
+const lastError = ref('')
+const totalDiamonds = ref(0)
+const suppressFailureAlert = ref(false)
 const taskProgress = ref({
   completed: 0,
   total: 0,
@@ -262,7 +279,10 @@ interface BrowserStatus {
   ready: boolean
   hasInstance: boolean
   hasPage: boolean
+  initializing?: boolean
   proxyUrl: string
+  lastError?: string | null
+  lastTitle?: string | null
 }
 const browserStatus = ref<BrowserStatus>({ ready: false, hasInstance: false, hasPage: false, proxyUrl: '' })
 const browserRestarting = ref(false)
@@ -298,7 +318,7 @@ const totalCombinations = computed(() => {
     availableStoneCertPairs.value.length *
     selectedShapes.value.length *
     caratCount *
-    FIXED_CLARITY_COLOR_PAIRS.length *
+    availableClarityColorPairs.value.length *
     (selectedCutGrades.value.length || 1)
   )
 })
@@ -325,6 +345,11 @@ async function handleCrawl(options: { silent?: boolean } = {}) {
   }
 
   loading.value = true
+  crawlStatus.value = 'running'
+  currentSessionId.value = null
+  lastError.value = ''
+  totalDiamonds.value = 0
+  suppressFailureAlert.value = !!options.silent
   progress.value = 'Starting...'
   taskProgress.value = { completed: 0, total: 0, successCount: 0, noDataCount: 0, percentage: 0, detail: '' }
 
@@ -339,11 +364,12 @@ async function handleCrawl(options: { silent?: boolean } = {}) {
     filters.caratRange = { min: caratMin.value, max: caratMax.value }
   }
 
-  filters.colorClarityPairs = FIXED_CLARITY_COLOR_PAIRS
+  filters.colorClarityPairs = availableClarityColorPairs.value
   if (selectedCutGrades.value.length > 0) filters.cutGrades = selectedCutGrades.value
 
   try {
     const result = await triggerBrandCrawl(props.brand.id, filters)
+    currentSessionId.value = result.sessionId
     progress.value = `Session #${result.sessionId} started`
 
     pollingInterval = setInterval(() => {
@@ -364,6 +390,9 @@ async function handleCrawl(options: { silent?: boolean } = {}) {
       alert(`Failed to start crawl: ${error.message}`)
     }
     loading.value = false
+    crawlStatus.value = 'failed'
+    lastError.value = error.message
+    suppressFailureAlert.value = false
     return {
       ok: false,
       status: 'failed',
@@ -396,13 +425,21 @@ async function pollSession(sessionId: number) {
     if (session.status === 'completed') {
       stopPolling()
       loading.value = false
+      crawlStatus.value = 'completed'
+      totalDiamonds.value = session.total_diamonds
+      suppressFailureAlert.value = false
       progress.value = `Done! ${session.total_diamonds} diamonds`
       loadRecentSessions()
     } else if (session.status === 'failed') {
       stopPolling()
       loading.value = false
+      crawlStatus.value = 'failed'
+      lastError.value = session.error || 'Crawl failed'
       progress.value = 'Failed'
-      alert(`Crawl failed: ${session.error}`)
+      if (!suppressFailureAlert.value) {
+        alert(`Crawl failed: ${session.error}`)
+      }
+      suppressFailureAlert.value = false
       loadRecentSessions()
     }
   } catch (error: any) {
@@ -415,6 +452,26 @@ function stopPolling() {
     clearInterval(pollingInterval)
     pollingInterval = null
   }
+}
+
+function resetCrawlState() {
+  if (loading.value) return false
+
+  stopPolling()
+  currentSessionId.value = null
+  crawlStatus.value = 'idle'
+  lastError.value = ''
+  totalDiamonds.value = 0
+  suppressFailureAlert.value = false
+  progress.value = ''
+  taskProgress.value = { completed: 0, total: 0, successCount: 0, noDataCount: 0, percentage: 0, detail: '' }
+  return true
+}
+
+function resetAfterDatabaseReset() {
+  if (!resetCrawlState()) return false
+  recentSessions.value = []
+  return true
 }
 
 // ========== 下载导出 ==========
@@ -471,12 +528,13 @@ async function fetchBrowserStatus() {
 async function restartBrowser() {
   browserRestarting.value = true
   try {
-    const response = await axios.post('/api/browser/restart')
+    const response = await axios.post('/api/browser/restart', { brand: props.brand.id })
     if (response.data.status) {
       browserStatus.value = response.data.status
     } else {
       await fetchBrowserStatus()
     }
+    await fetchBrowserStatus()
   } catch (error: any) {
     console.error('Failed to restart browser:', error)
   } finally {
@@ -491,7 +549,7 @@ onMounted(() => {
 
   if (props.brand.capabilities.requiresPuppeteer) {
     fetchBrowserStatus()
-    browserStatusInterval = setInterval(fetchBrowserStatus, 30000)
+    browserStatusInterval = setInterval(fetchBrowserStatus, 5000)
   }
 })
 
@@ -504,11 +562,19 @@ onUnmounted(() => {
 
 defineExpose({
   startCrawl: () => handleCrawl({ silent: true }),
+  resetCrawlState,
+  resetAfterDatabaseReset,
   getCrawlState: () => ({
     brandId: props.brand.id,
     brandName: props.brand.name,
+    sessionId: currentSessionId.value,
+    status: crawlStatus.value,
     loading: loading.value,
-    totalCombinations: totalCombinations.value
+    progress: progress.value,
+    taskProgress: taskProgress.value,
+    totalCombinations: totalCombinations.value,
+    totalDiamonds: totalDiamonds.value,
+    error: lastError.value
   })
 })
 </script>
@@ -647,6 +713,7 @@ defineExpose({
 .browser-status-text { font-size: 13px; color: #6b7280; flex: 1; }
 .browser-info { margin-top: 8px; display: flex; gap: 16px; flex-wrap: wrap; }
 .browser-detail { font-size: 12px; color: #9ca3af; }
+.browser-error { color: #dc2626; }
 .btn-small { padding: 6px 12px; font-size: 12px; }
 
 /* Card */

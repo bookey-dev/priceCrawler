@@ -4,15 +4,20 @@
  * 使用 puppeteer-real-browser 绕过 Cloudflare
  */
 const BaseCrawler = require('./BaseCrawler.cjs')
+const fs = require('fs')
+const puppeteer = require('puppeteer')
 const { connect } = require('puppeteer-real-browser')
 const { normalizeDiamond } = require('../normalizer.cjs')
+const { PROXY_URL } = require('../browserPool.cjs')
 
 const TARGET_URL = 'https://www.diamondsfactory.com/design/prong-setting-solitaire-engagement-ring-clrn0709701'
 const API_URL = 'https://www.diamondsfactory.com/index.php?route=product/product/add'
 const PRODUCT_ID = 14885
+const INIT_CHECK_ATTEMPTS = 6
+const INIT_RETRY_DELAY_MS = 5000
 
 // Option ID mappings
-const STONE_TYPE_VALUES = { 'DI': 122, 'LAB': 958 }
+const STONE_TYPE_VALUES = { 'DI': 122, 'NATURAL': 122, 'LAB': 958 }
 const SHAPE_VALUES = { 'RND': 125, 'PRN': 126, 'EMR': 127, 'MQS': 128, 'OVL': 129, 'RAD': 130, 'PER': 131, 'HRT': 132, 'CUS': 133, 'ASC': 135 }
 const CLARITY_VALUES = { 'FL': 139, 'IF': 140, 'VVS1': 141, 'VVS2': 142, 'VS1': 143, 'VS2': 144, 'SI1': 145, 'SI2': 146, 'I1': 147 }
 const COLOR_VALUES = { 'D': 150, 'E': 151, 'F': 152, 'G': 153, 'H': 154, 'I': 155, 'J': 853, 'K': 854, 'L': 855 }
@@ -57,11 +62,44 @@ const COLORS_LIST = ['D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L']
 const CUT_GRADES_LIST = ['EX', 'VG', 'GD', 'FR']
 const CERTIFICATES_LIST = ['DF', 'EGL', 'IGI', 'GIA']
 
+function resolveChromePath() {
+  const configuredPath = process.env.CHROME_EXECUTABLE_PATH || process.env.PUPPETEER_EXECUTABLE_PATH
+  if (configuredPath) {
+    if (!fs.existsSync(configuredPath)) {
+      throw new Error(`Chrome executable not found at ${configuredPath}. Set CHROME_EXECUTABLE_PATH to a valid chrome.exe path.`)
+    }
+    return configuredPath
+  }
+
+  const defaultChromePaths = [
+    process.env.PROGRAMFILES ? `${process.env.PROGRAMFILES}\\Google\\Chrome\\Application\\chrome.exe` : null,
+    process.env['PROGRAMFILES(X86)'] ? `${process.env['PROGRAMFILES(X86)']}\\Google\\Chrome\\Application\\chrome.exe` : null,
+    process.env.LOCALAPPDATA ? `${process.env.LOCALAPPDATA}\\Google\\Chrome\\Application\\chrome.exe` : null
+  ].filter(Boolean)
+
+  const defaultChromePath = defaultChromePaths.find(p => fs.existsSync(p))
+  if (defaultChromePath) return defaultChromePath
+
+  try {
+    const bundledPath = puppeteer.executablePath()
+    if (bundledPath && fs.existsSync(bundledPath)) return bundledPath
+  } catch (e) {
+    // chrome-launcher will try system Chrome paths if Puppeteer's browser is not installed.
+  }
+
+  return null
+}
+
 class DFCrawler extends BaseCrawler {
   constructor() {
     super('DF', 'Diamonds Factory')
     this._page = null
     this._browser = null
+    this._launching = null
+    this._lastError = null
+    this._lastTitle = null
+    this._activeCrawls = 0
+    this._autoCloseBrowser = process.env.DF_KEEP_BROWSER_OPEN !== 'true'
   }
 
   getCapabilities() {
@@ -92,14 +130,44 @@ class DFCrawler extends BaseCrawler {
         console.log('[DF] Page lost, reconnecting...')
         this._page = null
         this._browser = null
+        this._ready = false
       }
     }
 
+    if (this._launching) {
+      return this._launching
+    }
+
+    this._launching = this._launchPage()
+    try {
+      return await this._launching
+    } finally {
+      this._launching = null
+    }
+  }
+
+  async _launchPage() {
+    this._lastError = null
+    this._lastTitle = null
+
     console.log('[DF] Launching puppeteer-real-browser...')
+    const chromePath = resolveChromePath()
+    if (chromePath) {
+      console.log(`[DF] Using Chrome executable: ${chromePath}`)
+    }
+
     const { page, browser } = await connect({
-      headless: 'auto',
+      headless: false,
       turnstile: true,
-      args: ['--no-sandbox', '--lang=en-US']
+      customConfig: chromePath ? { chromePath } : {},
+      args: [
+        '--no-sandbox',
+        '--lang=en-US',
+        `--proxy-server=${PROXY_URL}`
+      ],
+      connectOption: {
+        defaultViewport: null
+      }
     })
     this._browser = browser
     this._page = page
@@ -109,47 +177,84 @@ class DFCrawler extends BaseCrawler {
       console.log('[DF] Navigation timeout (may still work):', e.message)
     })
 
-    // 等待 Cloudflare 通过
-    for (let i = 0; i < 30; i++) {
+    // 等待 Cloudflare 通过；失败后刷新页面再检测。
+    for (let i = 0; i < INIT_CHECK_ATTEMPTS; i++) {
       const title = await page.title()
+      this._lastTitle = title
       if (!title.includes('Just a moment') && !title.includes('请稍候') && !title.includes('Attention')) {
         console.log(`[DF] Cloudflare passed! Title: "${title}"`)
         return page
       }
-      console.log(`[DF] Waiting for Cloudflare... (${i + 1}/30)`)
-      await this.sleep(2000)
+
+      if (i === INIT_CHECK_ATTEMPTS - 1) break
+
+      console.log(`[DF] Initialization check failed (${i + 1}/${INIT_CHECK_ATTEMPTS}), refreshing after ${INIT_RETRY_DELAY_MS / 1000}s... Title: "${title}"`)
+      await this.sleep(INIT_RETRY_DELAY_MS)
+      await page.reload({ waitUntil: 'domcontentloaded', timeout: 90000 }).catch(e => {
+        console.log('[DF] Reload timeout (may still work):', e.message)
+      })
     }
 
-    throw new Error('Cloudflare challenge not passed after 60 seconds')
+    throw new Error(`Cloudflare challenge not passed after ${INIT_CHECK_ATTEMPTS} checks`)
   }
 
   async initialize() {
     try {
       await this._getPage()
       this._ready = true
+      if (this._autoCloseBrowser) {
+        await this._closeBrowser()
+        console.log('[DF] Browser closed after initialization; it will reopen on crawl')
+      }
     } catch (error) {
       console.error('[DF] Failed to initialize:', error.message)
+      this._lastError = error.message
       this._ready = false
     }
   }
 
-  async shutdown() {
+  async _closeBrowser() {
     if (this._browser) {
       try { await this._browser.close() } catch (e) {}
       this._browser = null
       this._page = null
     }
+  }
+
+  async shutdown() {
+    await this._closeBrowser()
     this._ready = false
   }
 
   getStatus() {
     return {
       ready: this._ready,
-      hasInstance: !!this._browser
+      hasInstance: !!this._browser,
+      hasPage: !!this._page,
+      initializing: !!this._launching,
+      activeCrawls: this._activeCrawls,
+      autoCloseBrowser: this._autoCloseBrowser,
+      proxyUrl: PROXY_URL,
+      lastError: this._lastError,
+      lastTitle: this._lastTitle
     }
   }
 
   async crawl(filters = {}, callbacks = {}) {
+    this._activeCrawls += 1
+    try {
+      return await this._crawlBatch(filters, callbacks)
+    } finally {
+      this._activeCrawls = Math.max(0, this._activeCrawls - 1)
+      if (this._autoCloseBrowser && this._activeCrawls === 0) {
+        await this._closeBrowser()
+        this._ready = true
+        console.log('[DF] Browser closed after crawl')
+      }
+    }
+  }
+
+  async _crawlBatch(filters = {}, callbacks = {}) {
     // 确保页面已初始化
     if (!this._ready) {
       try {
@@ -158,6 +263,7 @@ class DFCrawler extends BaseCrawler {
         console.log('[DF] Page initialized before crawl')
       } catch (e) {
         console.error('[DF] Failed to initialize page before crawl:', e.message)
+        this._lastError = e.message
       }
     }
 

@@ -67,3 +67,15 @@ export async function getBrandTrend(params: {
   const response = await api.get('/trends/brand', { params })
   return response.data
 }
+
+export async function resetDatabase(): Promise<{
+  message: string
+  deleted: {
+    diamondPrices: number
+    crawlSessions: number
+    priceSnapshots: number
+  }
+}> {
+  const response = await api.post('/admin/reset-database')
+  return response.data
+}

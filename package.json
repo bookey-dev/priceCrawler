@@ -5,6 +5,7 @@
   "type": "module",
   "main": "index.js",
   "scripts": {
+    "install:chrome": "set PUPPETEER_SKIP_DOWNLOAD=false&& puppeteer browsers install chrome",
     "dev": "vite",
     "build": "vue-tsc && vite build",
     "preview": "vite preview",

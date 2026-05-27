@@ -2,6 +2,13 @@
 
 Multi-brand diamond price crawler with a Vue 3 dashboard, an Express API, SQLite storage, and brand-specific crawlers powered by HTTP requests or Puppeteer.
 
+
+```bash
+npm install
+$env:CHROME_EXECUTABLE_PATH="C:\Program Files\Google\Chrome\Application\chrome.exe"
+npm start
+```
+
 ## What This Project Does
 
 - Crawls diamond prices from multiple brands.
@@ -49,12 +56,29 @@ priceCrawler/
 
 - Node.js 18+
 - npm
-- A working local browser environment for Puppeteer
+- A working local browser environment for Puppeteer/Chrome
 - Local HTTPS certificate files:
   - `server/ssl/server.key`
   - `server/ssl/server.cert`
 - If you use Puppeteer-based brands, a reachable SOCKS proxy is currently hardcoded in [server/browserPool.cjs](/Users/lijun/GitHub/priceCrawler/server/browserPool.cjs:9):
   - `socks5://127.0.0.1:7897`
+
+### Chrome on a New Windows Machine
+
+The DF crawler uses `puppeteer-real-browser`, which needs a Chrome executable. On a fresh Windows 10 machine, install Chrome or install Puppeteer's bundled Chrome:
+
+```powershell
+npx puppeteer browsers install chrome
+```
+
+If Chrome is installed in a non-standard location, set the executable path before starting the server:
+
+```powershell
+$env:CHROME_EXECUTABLE_PATH="C:\Program Files\Google\Chrome\Application\chrome.exe"
+npm start
+```
+
+The crawler also accepts `PUPPETEER_EXECUTABLE_PATH`. If neither environment variable is set, it tries Puppeteer's bundled Chrome first, then lets `chrome-launcher` search the system Chrome installations.
 
 ## Install
 

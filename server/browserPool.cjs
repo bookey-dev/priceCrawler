@@ -4,9 +4,32 @@
  */
 const puppeteer = require('puppeteer-extra')
 const StealthPlugin = require('puppeteer-extra-plugin-stealth')
+const fs = require('fs')
 puppeteer.use(StealthPlugin())
 
-const PROXY_URL = 'socks5://127.0.0.1:7897'
+const PROXY_URL = process.env.BROWSER_PROXY_URL || 'socks5://127.0.0.1:7897'
+const DEFAULT_CHROME_PATHS = [
+  process.env.CHROME_EXECUTABLE_PATH,
+  process.env.PUPPETEER_EXECUTABLE_PATH,
+  process.env.PROGRAMFILES ? `${process.env.PROGRAMFILES}\\Google\\Chrome\\Application\\chrome.exe` : null,
+  process.env['PROGRAMFILES(X86)'] ? `${process.env['PROGRAMFILES(X86)']}\\Google\\Chrome\\Application\\chrome.exe` : null,
+  process.env.LOCALAPPDATA ? `${process.env.LOCALAPPDATA}\\Google\\Chrome\\Application\\chrome.exe` : null
+].filter(Boolean)
+
+function resolveChromeExecutablePath() {
+  const configuredPath = process.env.CHROME_EXECUTABLE_PATH || process.env.PUPPETEER_EXECUTABLE_PATH
+  if (configuredPath) {
+    if (!fs.existsSync(configuredPath)) {
+      throw new Error(`Chrome executable not found at ${configuredPath}. Set CHROME_EXECUTABLE_PATH to a valid chrome.exe path.`)
+    }
+    return configuredPath
+  }
+
+  const defaultPath = DEFAULT_CHROME_PATHS.find(p => fs.existsSync(p))
+  if (defaultPath) return defaultPath
+
+  throw new Error('Chrome executable not found. Set CHROME_EXECUTABLE_PATH, for example: $env:CHROME_EXECUTABLE_PATH="C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"')
+}
 
 let browserInstance = null
 let browserReady = false
@@ -33,8 +56,10 @@ async function getBrowser() {
   }
 
   browserLaunching = (async () => {
-    console.log('[BrowserPool] Launching Puppeteer with proxy...')
+    const executablePath = resolveChromeExecutablePath()
+    console.log(`[BrowserPool] Launching Puppeteer with Chrome: ${executablePath}`)
     browserInstance = await puppeteer.launch({
+      executablePath,
       headless: 'new',
       args: [
         `--proxy-server=${PROXY_URL}`,
@@ -120,12 +145,18 @@ async function shutdown() {
 }
 
 function getStatus() {
+  let chromeExecutablePath = null
+  try {
+    chromeExecutablePath = resolveChromeExecutablePath()
+  } catch (e) {}
+
   return {
     ready: browserReady,
     hasInstance: !!browserInstance,
     activeDomains: Array.from(pages.keys()),
-    proxyUrl: PROXY_URL
+    proxyUrl: PROXY_URL,
+    chromeExecutablePath
   }
 }
 
-module.exports = { getBrowser, getPage, releasePage, shutdown, getStatus }
+module.exports = { getBrowser, getPage, releasePage, shutdown, getStatus, PROXY_URL }
