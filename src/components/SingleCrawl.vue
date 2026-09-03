@@ -109,14 +109,18 @@
           <div class="multi-select">
             <div
               v-for="pair in availableClarityColorPairs"
-              :key="pair.clarity + pair.color"
-              class="chip selected"
-              style="cursor: default;"
+              :key="clarityColorPairKey(pair)"
+              class="chip"
+              :class="{ selected: isClarityColorPairSelected(pair) }"
+              :style="{ cursor: isDiamondsFactory ? 'pointer' : 'default' }"
+              @click="toggleClarityColorPair(pair)"
             >
               {{ pair.clarity }} + {{ pair.color }}
             </div>
           </div>
-          <div class="fixed-hint">Fixed combinations</div>
+          <div class="fixed-hint">
+            {{ isDiamondsFactory ? 'Select combinations (none selected by default)' : 'Fixed combinations' }}
+          </div>
         </div>
 
         <!-- Cut Grade -->
@@ -205,10 +209,20 @@ const props = defineProps<{
   brand: Brand
 }>()
 
+interface ClarityColorPair {
+  clarity: string
+  color: string
+}
+
 // Fixed clarity+color pairs (applies to ALL brands)
-const FIXED_CLARITY_COLOR_PAIRS = [
+const FIXED_CLARITY_COLOR_PAIRS: ClarityColorPair[] = [
   { clarity: 'VVS1', color: 'E' },
   { clarity: 'VS1', color: 'G' }
+]
+
+// Diamonds Factory-only additions.
+const DF_EXTRA_CLARITY_COLOR_PAIRS: ClarityColorPair[] = [
+  { clarity: 'VS1', color: 'F' }
 ]
 
 // Fixed stone type + certificate bindings: Natural→GIA, Lab→IGI
@@ -219,6 +233,7 @@ const STONE_CERT_BINDINGS = [
 
 // 动态参数选项（从品牌 capabilities 派生）
 const caps = computed(() => props.brand.capabilities)
+const isDiamondsFactory = computed(() => props.brand.id.toUpperCase() === 'DF')
 
 // Only show stone+cert pairs that the brand supports
 const availableStoneCertPairs = computed(() => {
@@ -236,7 +251,11 @@ const availableCutGrades = computed(() => caps.value.cutGrades || [])
 const availableClarityColorPairs = computed(() => {
   const clarities = caps.value.clarities || []
   const colors = caps.value.colors || []
-  return FIXED_CLARITY_COLOR_PAIRS.filter(pair => {
+  const pairs = isDiamondsFactory.value
+    ? [...FIXED_CLARITY_COLOR_PAIRS, ...DF_EXTRA_CLARITY_COLOR_PAIRS]
+    : FIXED_CLARITY_COLOR_PAIRS
+
+  return pairs.filter(pair => {
     const supportsClarity = clarities.length === 0 || clarities.includes(pair.clarity)
     const supportsColor = colors.length === 0 || colors.includes(pair.color)
     return supportsClarity && supportsColor
@@ -250,6 +269,7 @@ const cutGradeLabel = (key: string) => caps.value.cutGradeLabels?.[key] || key
 const selectedShapes = ref<string[]>([])
 const selectedCarats = ref<string[]>([])
 const selectedCutGrades = ref<string[]>([])
+const selectedClarityColorPairKeys = ref<string[]>([])
 const caratMin = ref(0.2)
 const caratMax = ref(10.0)
 
@@ -298,9 +318,22 @@ function toggleSelection(arr: string[], value: string) {
   }
 }
 
+const clarityColorPairKey = (pair: ClarityColorPair) => `${pair.clarity}|${pair.color}`
+
+function isClarityColorPairSelected(pair: ClarityColorPair) {
+  return !isDiamondsFactory.value || selectedClarityColorPairKeys.value.includes(clarityColorPairKey(pair))
+}
+
+function toggleClarityColorPair(pair: ClarityColorPair) {
+  if (!isDiamondsFactory.value) return
+  toggleSelection(selectedClarityColorPairKeys.value, clarityColorPairKey(pair))
+}
+
 // ========== 初始化选中项 ==========
 function resetSelections() {
   const c = caps.value
+
+  selectedClarityColorPairKeys.value = []
 
   selectedShapes.value = [...c.shapes]
   selectedCarats.value = c.caratValues ? [...c.caratValues] : []
@@ -312,13 +345,17 @@ function resetSelections() {
 }
 
 // ========== Computed ==========
+const selectedClarityColorPairs = computed(() =>
+  availableClarityColorPairs.value.filter(isClarityColorPairSelected)
+)
+
 const totalCombinations = computed(() => {
   const caratCount = availableCaratValues.value.length > 0 ? selectedCarats.value.length : 1
   return (
     availableStoneCertPairs.value.length *
     selectedShapes.value.length *
     caratCount *
-    availableClarityColorPairs.value.length *
+    selectedClarityColorPairs.value.length *
     (selectedCutGrades.value.length || 1)
   )
 })
@@ -364,7 +401,7 @@ async function handleCrawl(options: { silent?: boolean } = {}) {
     filters.caratRange = { min: caratMin.value, max: caratMax.value }
   }
 
-  filters.colorClarityPairs = availableClarityColorPairs.value
+  filters.colorClarityPairs = selectedClarityColorPairs.value.map(({ clarity, color }) => ({ clarity, color }))
   if (selectedCutGrades.value.length > 0) filters.cutGrades = selectedCutGrades.value
 
   try {
